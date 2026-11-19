@@ -984,8 +984,7 @@ export default function activate(ctx) {
         { className: 'sp-diag' },
         '插件命令 ' + (counts.plugins || 0) + ' · 用户 ' + (counts.user || 0) + ' · 项目 ' + (counts.project || 0) + '\n' +
           'CLI 目录：' + (roots.claude || '未解析') + '\n' +
-          '插件缓存：' + (roots.plugins || '未解析') + '\n' +
-          '当前工作区：' + (roots.workspace || '未解析（项目级命令跳过）'),
+          '插件缓存：' + (roots.plugins || '未解析'),
       ),
     );
   }
