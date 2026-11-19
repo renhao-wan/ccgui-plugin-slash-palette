@@ -118,6 +118,12 @@ const ctx = {
 const mod = await import(PLUGIN);
 const dispose = mod.default(ctx);
 
+// 启动时的设置读取是异步的：微任务跑完之前开关应禁用，
+// 否则用户在这几十毫秒内点击会用默认值覆盖已保存的设置。
+const preLoadBoxes = checkboxes(renderFresh(settingsSection.component).tree);
+const disabledBeforeLoad =
+  preLoadBoxes.length > 0 && preLoadBoxes.every((b) => b.props && b.props.disabled === true);
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 每个组件独立渲染：清空 hooks 槽，避免不同组件串状态
@@ -251,6 +257,7 @@ const togglesIndependent = !!(
   thirdBoxes[2] &&
   thirdBoxes[2].props.checked === true
 );
+const enabledAfterLoad = thirdBoxes.length > 0 && thirdBoxes.every((b) => b.props.disabled !== true);
 
 // ---- 第七段：卸载清理 ----
 let disposeOk = true;
@@ -297,6 +304,8 @@ const checks = [
   ['命令面板入口能重新打开面板', !!reopenedSearch],
   ['面板容器响应 Esc（焦点不在搜索框也有效）', escClosed],
   ['连续切换两个开关互不覆盖', togglesIndependent],
+  ['设置加载完成前开关禁用', disabledBeforeLoad],
+  ['设置加载完成后开关可用', enabledAfterLoad],
   ['样式通过宿主主题注入一次', injectedCss.length === 1 && injectedCss[0].indexOf('.sp-chip') >= 0],
   ['卸载函数可安全执行', disposeOk],
 ];

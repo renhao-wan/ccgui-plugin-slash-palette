@@ -258,6 +258,7 @@ const UI_CSS = `
   border-radius: 8px;
 }
 .sp-setting input { margin-top: 2px; }
+.sp-setting input:disabled { opacity: .45; cursor: default; }
 .sp-setting-title { font-size: 12.5px; font-weight: 600; }
 .sp-setting-desc { margin-top: 2px; color: var(--color-text-secondary, #656d76); font-size: 11.5px; }
 .sp-actions { display: flex; align-items: center; gap: 10px; }
@@ -526,6 +527,8 @@ export default function activate(ctx) {
       counts: {},
       error: '',
       settings: Object.assign({}, DEFAULT_SETTINGS),
+      // storage 里的设置读回前为 false：此时开关禁用，避免用默认值覆盖已保存的选择
+      settingsLoaded: false,
       toast: '',
       activeIndex: 0,
       query: '',
@@ -719,7 +722,7 @@ export default function activate(ctx) {
   // 启动：先恢复设置与缓存，缓存过期或缺失才重扫
   void (async () => {
     const settings = await readSettings();
-    store.set({ settings });
+    store.set({ settings, settingsLoaded: true });
     let saved = null;
     if (ctx.storage) {
       try {
@@ -967,6 +970,8 @@ export default function activate(ctx) {
     const snap = useSnap();
     const s = snap.settings;
     const toggle = (key) => {
+      // 设置还没从 storage 读回时忽略点击：否则会用默认值覆盖已保存的选择
+      if (!store.snap.settingsLoaded) return;
       // 读实时快照而不是本次渲染的闭包值：连续点两个开关时不会互相覆盖
       const cur = store.snap.settings;
       void writeSettings(Object.assign({}, cur, { [key]: !cur[key] }));
@@ -976,7 +981,12 @@ export default function activate(ctx) {
       return h(
         'label',
         { className: 'sp-setting', key },
-        h('input', { type: 'checkbox', checked: !!s[key], onChange: () => toggle(key) }),
+        h('input', {
+          type: 'checkbox',
+          checked: !!s[key],
+          disabled: !snap.settingsLoaded,
+          onChange: () => toggle(key),
+        }),
         h(
           'span',
           null,
