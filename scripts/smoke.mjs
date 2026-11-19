@@ -247,7 +247,7 @@ const checks = [
   ['草稿命令属于插件命名空间', /^\/[^/\s]+:[^/\s]+/.test(lastDraft)],
 
   ['设置页渲染出来源开关', settingsText.indexOf('插件命令与技能') >= 0],
-  ['设置页渲染出项目级开关', settingsText.indexOf('项目命令与技能') >= 0],
+  ['设置页不再出现项目级开关', settingsText.indexOf('项目命令与技能') < 0],
   ['设置页渲染出刷新按钮', settingsText.indexOf('立即刷新') >= 0],
   ['设置页渲染出诊断路径', settingsText.indexOf('CLI 目录') >= 0],
 

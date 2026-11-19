@@ -10,14 +10,11 @@ const CACHE_TTL = 10 * 60 * 1000;
 const DEFAULT_SETTINGS = {
   plugins: true,
   user: true,
-  project: false,
   builtin: false,
   showDesc: true,
 };
 
 const GROUP_LABEL = {
-  'project-command': '项目命令',
-  'project-skill': '项目技能',
   'user-command': '用户命令',
   'user-skill': '用户技能',
   'plugin-command': '插件命令',
@@ -26,8 +23,6 @@ const GROUP_LABEL = {
 };
 
 const GROUP_ORDER = [
-  'project-command',
-  'project-skill',
   'user-command',
   'user-skill',
   'plugin-command',
@@ -309,7 +304,6 @@ function toEncodedCommand(script) {
   return b64;
 }
 
-// @@WORKSPACE@@ 留空表示不扫项目级
 const SCAN_SCRIPT = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
@@ -318,8 +312,6 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $homeDir = $env:USERPROFILE
 if ([string]::IsNullOrWhiteSpace($homeDir)) { $homeDir = $HOME }
 $claudeDir = Join-Path $homeDir '.claude'
-$workspaceDir = '@@WORKSPACE@@'
-$wantWorkspace = -not [string]::IsNullOrWhiteSpace($workspaceDir)
 
 $rows = New-Object System.Collections.ArrayList
 $seen = @{}
@@ -386,26 +378,6 @@ function Strip-Rel {
   return ($rel -replace '[\\/]', ':')
 }
 
-# --- 项目级（优先级最高，同名命令先占位）---
-if ($wantWorkspace) {
-  $projCmd = Join-Path $workspaceDir '.claude\commands'
-  if (Test-Path -LiteralPath $projCmd) {
-    foreach ($f in @(Get-ChildItem -LiteralPath $projCmd -Recurse -File -Filter *.md -ErrorAction SilentlyContinue)) {
-      $meta = Read-Meta $f.FullName
-      Add-Row 'project-command' ('/' + (Strip-Rel $projCmd $f.FullName)) $meta.description $meta.hint '' '' $f.FullName
-    }
-  }
-  $projSkill = Join-Path $workspaceDir '.claude\skills'
-  if (Test-Path -LiteralPath $projSkill) {
-    foreach ($d in @(Get-ChildItem -LiteralPath $projSkill -Directory -ErrorAction SilentlyContinue)) {
-      $md = Join-Path $d.FullName 'SKILL.md'
-      if (-not (Test-Path -LiteralPath $md)) { continue }
-      $meta = Read-Meta $md
-      Add-Row 'project-skill' ('/' + $d.Name) $meta.description $meta.hint '' '' $md
-    }
-  }
-}
-
 # --- 用户级 ---
 $userCmd = Join-Path $claudeDir 'commands'
 if (Test-Path -LiteralPath $userCmd) {
@@ -457,9 +429,8 @@ if (Test-Path -LiteralPath $cacheRoot) {
 }
 
 $order = @{
-  'project-command' = 0; 'project-skill' = 1;
-  'user-command' = 2; 'user-skill' = 3;
-  'plugin-command' = 4; 'plugin-skill' = 5
+  'user-command' = 0; 'user-skill' = 1;
+  'plugin-command' = 2; 'plugin-skill' = 3
 }
 $sorted = @($rows | Sort-Object @{ Expression = { $order[$_.kind] } }, @{ Expression = { $_.invoke } })
 
@@ -470,12 +441,10 @@ $result = [pscustomobject]@{
     home = $homeDir
     claude = $claudeDir
     plugins = $cacheRoot
-    workspace = $workspaceDir
   }
   counts = [pscustomobject]@{
     plugins = @($rows | Where-Object { $_.kind -like 'plugin-*' }).Count
     user = @($rows | Where-Object { $_.kind -like 'user-*' }).Count
-    project = @($rows | Where-Object { $_.kind -like 'project-*' }).Count
   }
   items = $sorted
 }
@@ -561,7 +530,6 @@ export default function activate(ctx) {
     for (const it of snap.items) {
       if (it.kind.indexOf('plugin-') === 0 && !s.plugins) continue;
       if (it.kind.indexOf('user-') === 0 && !s.user) continue;
-      if (it.kind.indexOf('project-') === 0 && !s.project) continue;
       out.push(it);
     }
     if (s.builtin) {
@@ -591,52 +559,12 @@ export default function activate(ctx) {
     });
   }
 
-  function pickPath(o) {
-    if (!o || typeof o !== 'object') return '';
-    const keys = ['path', 'workspacePath', 'rootPath', 'root', 'dir'];
-    for (const k of keys) {
-      if (typeof o[k] === 'string' && o[k]) return o[k];
-    }
-    return '';
-  }
-
-  // 工作区路径解析按三级降级：元数据 → 侧栏列表 → 放弃项目级。
-  // 任一调用缺权限都会抛错，这里全部吞掉。
-  async function resolveWorkspace() {
-    try {
-      if (ctx.workspace && ctx.workspace.getMetadata) {
-        const p = pickPath(await ctx.workspace.getMetadata());
-        if (p) return p;
-      }
-    } catch {
-      // 权限缺失或宿主未实现
-    }
-    try {
-      if (ctx.workspaces && ctx.workspaces.list) {
-        const rows = await ctx.workspaces.list();
-        const list = Array.isArray(rows) ? rows : [];
-        for (const row of list) {
-          const p = pickPath(row);
-          if (p) return p;
-        }
-      }
-    } catch {
-      // 同上
-    }
-    return '';
-  }
-
-  function buildScanScript(workspace) {
-    return SCAN_SCRIPT.replace('@@WORKSPACE@@', String(workspace || '').replace(/'/g, "''"));
-  }
-
   let inflight = null;
 
   async function runScan() {
     store.set({ status: 'scanning', error: '' });
     try {
-      const workspace = await resolveWorkspace();
-      const encoded = toEncodedCommand(buildScanScript(workspace));
+      const encoded = toEncodedCommand(SCAN_SCRIPT);
       if (!encoded) throw new Error('无法编码 PowerShell 脚本');
       const r = await ctx.bridge.invoke('plugin_exec_run', {
         bin: 'powershell',
@@ -702,7 +630,6 @@ export default function activate(ctx) {
       return {
         plugins: s.plugins !== false,
         user: s.user !== false,
-        project: s.project === true,
         builtin: s.builtin === true,
         showDesc: s.showDesc !== false,
       };
@@ -969,7 +896,6 @@ export default function activate(ctx) {
       ),
       row('plugins', '插件命令与技能', '读取 ~/.claude/plugins/cache 下的 commands/*.md 与 skills/*/SKILL.md。'),
       row('user', '用户命令与技能', '读取 ~/.claude/commands/*.md 与 ~/.claude/skills/*/SKILL.md。'),
-      row('project', '项目命令与技能', '读取当前工作区 .claude/commands 与 .claude/skills；需要能解析当前工作区路径。'),
       row('builtin', '内置命令', '补充 /help、/clear、/compact 等常见命令，可能与宿主自带列表重复。'),
       row('showDesc', '显示命令描述', '在列表里显示每个命令 frontmatter 里的 description。'),
       h(
@@ -982,7 +908,7 @@ export default function activate(ctx) {
       h(
         'div',
         { className: 'sp-diag' },
-        '插件命令 ' + (counts.plugins || 0) + ' · 用户 ' + (counts.user || 0) + ' · 项目 ' + (counts.project || 0) + '\n' +
+        '插件命令 ' + (counts.plugins || 0) + ' · 用户 ' + (counts.user || 0) + '\n' +
           'CLI 目录：' + (roots.claude || '未解析') + '\n' +
           '插件缓存：' + (roots.plugins || '未解析'),
       ),

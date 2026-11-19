@@ -39,8 +39,6 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 | 插件技能 | `~/.claude/plugins/cache/*/*/*/skills/*/SKILL.md` | `/插件名:技能名` |
 | 用户命令 | `~/.claude/commands/**/*.md` | `/命令名` |
 | 用户技能 | `~/.claude/skills/*/SKILL.md` | `/技能名` |
-| 项目命令（默认关闭） | `<工作区>/.claude/commands/**/*.md` | `/命令名` |
-| 项目技能（默认关闭） | `<工作区>/.claude/skills/*/SKILL.md` | `/技能名` |
 | 内置命令（默认关闭） | 插件内置 | `/help` 等 |
 
 同一插件在缓存里存在多个版本目录时，只取最近写入的那一个。
@@ -51,7 +49,6 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 2. **不会自动发送**：写入后仍需你自己按发送。
 3. **弹层是居中浮层**：SDK 不暴露输入框坐标，插件也不能读宿主 DOM，无法做成紧贴输入框的下拉。
 4. **Windows 专用**：扫描走 `exec:powershell`。macOS / Linux 需要另加 `exec:sh` 与第二套脚本，当前版本未实现。
-5. **项目级路径不确定**：`ctx.workspace.getMetadata()` 的返回形状在 SDK 文档里没有展开，插件按 `path` / `workspacePath` / `rootPath` 多字段尝试，再降级到侧栏工作区列表；都拿不到就跳过项目级扫描，设置页会显示实际解析结果。
 
 ## 权限
 
@@ -64,8 +61,6 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 | `composer:draft` | 写入草稿 |
 | `exec:powershell` | 列目录、读 frontmatter |
 | `storage` | 缓存命令列表与设置 |
-| `host:workspace` | 降级读取侧栏工作区路径 |
-| `workspace.metadata.read` | 读取当前工作区元数据 |
 
 `exec:powershell` 只执行插件内置的只读扫描脚本：列目录、读命令文件的 frontmatter，不写入、不联网。
 

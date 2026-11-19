@@ -18,8 +18,6 @@
     "ui:settings-section",
     "composer:draft",
     "exec:powershell",
-    "storage",
-    "host:workspace",
-    "workspace.metadata.read"
+    "storage"
   ]
 }
