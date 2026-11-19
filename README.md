@@ -29,7 +29,7 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 - 搜索命令名或 frontmatter 里的 `description`。
 - 键盘 `↑` `↓` 选择、`Enter` 写入、`Esc` 关闭；鼠标同样可用。
 - 按来源分组，可在设置页逐项开关。
-- 扫描结果缓存 10 分钟，过期后台重扫；扫描失败保留旧缓存。
+- 扫描结果缓存 10 分钟，过期后台重扫；扫描失败保留旧缓存，空结果不写缓存。
 
 ## 命令来源
 
@@ -49,6 +49,7 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 2. **不会自动发送**：写入后仍需你自己按发送。
 3. **弹层是居中浮层**：SDK 不暴露输入框坐标，插件也不能读宿主 DOM，无法做成紧贴输入框的下拉。
 4. **Windows 专用**：扫描走 `exec:powershell`。macOS / Linux 需要另加 `exec:sh` 与第二套脚本，当前版本未实现。
+5. **首次打开有扫描延迟**：缓存缺失或过期时，打开面板（或设置页点「立即刷新」）会调用 PowerShell 扫描本机命令目录，通常 1–2 秒；之后 10 分钟内直接读缓存。
 
 ## 权限
 
@@ -60,6 +61,7 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 | `ui:settings-section` | 设置页 |
 | `composer:draft` | 写入草稿 |
 | `exec:powershell` | 列目录、读 frontmatter |
+| `theme` | 通过宿主主题接口注入插件样式（老宿主回退到组件内联） |
 | `storage` | 缓存命令列表与设置 |
 
 `exec:powershell` 只执行插件内置的只读扫描脚本：列目录、读命令文件的 frontmatter，不写入、不联网。
@@ -82,8 +84,8 @@ node scripts/smoke.mjs               # 真实调用 PowerShell，验证扫描与
 推送与 `manifest.json` 的 `version` 相同的 tag（无 `v` 前缀也可）触发 GitHub Actions：
 
 ```bash
-git tag 1.0.1
-git push origin 1.0.1
+git tag 0.1.0
+git push origin 0.1.0
 ```
 
 流水线会校验 manifest、比对 tag、生成 `checksums.txt`，并把 `main.js`、`manifest.json`、`checksums.txt` 附到 Release。

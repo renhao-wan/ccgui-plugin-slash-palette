@@ -74,17 +74,46 @@ if (!fs.existsSync(bundle)) {
   ];
   for (const [re, label] of banned) if (re.test(src)) fail(`main.js 命中黑名单：${label}`);
 
-  // 权限 ↔ 代码用法一致性：少声明时宿主会在运行期抛错或静默降级
+  // 权限 ↔ 代码用法一致性：与索引仓 scripts/validate.mjs 的 CTX_PERMISSION_MAP 对齐。
+  // 少声明时索引仓 CI 会直接报 error，本地先拦住。
   const declared = new Set(m.permissions || []);
   const required = [];
   if (/\bctx\.storage\s*\./.test(src)) required.push(['storage', 'ctx.storage']);
   if (/\bctx\.ui\.registerSettingsSection\b|\bctx\.ui\.openSettings\b/.test(src))
     required.push(['ui:settings-section', 'settings section']);
   if (/\bctx\.ui\.registerCommand\b/.test(src)) required.push(['ui:command', 'registerCommand']);
-  if (/plugin_exec_run[\s\S]{0,300}?bin\s*:\s*['"]powershell['"]/.test(src))
-    required.push(['exec:powershell', 'plugin_exec_run powershell']);
+  if (/\bctx\.ui\.registerComposerStatusItem\b|\bctx\.ui\.registerComposerSlot\b/.test(src))
+    required.push(['ui:composer-status', 'registerComposerStatusItem']);
+  if (/\bctx\.ui\.registerOverlay\b/.test(src)) required.push(['ui:overlay', 'registerOverlay']);
+  if (/\bctx\.composer\.setDraft\s*\(/.test(src))
+    required.push(['composer:draft', 'composer.setDraft']);
+  if (/\bctx\.theme\.(injectCss|setTokens)\s*\(/.test(src))
+    required.push(['theme', 'ctx.theme.injectCss']);
+
+  // exec：按 bin 字段推断需要哪一项 exec: 授权（不写死 powershell）
+  const bins = new Set();
+  const execBinRe = /plugin_exec_[a-z_]+[\s\S]{0,400}?bin\s*:\s*['"]([A-Za-z0-9._-]+)['"]/g;
+  let binMatch;
+  while ((binMatch = execBinRe.exec(src))) bins.add(binMatch[1]);
+  if (bins.size) {
+    for (const bin of bins) required.push(['exec:' + bin, 'plugin_exec_* bin=' + bin]);
+  } else if (/plugin_exec_[a-z_]+/.test(src) && ![...declared].some((p) => p.startsWith('exec:'))) {
+    fail('源码调用 plugin_exec_*，但 manifest.permissions 没有任何 exec: 授权');
+  }
+
   for (const [perm, usage] of required) {
     if (!declared.has(perm)) fail(`源码用到 ${usage}，但 manifest.permissions 缺少 ${perm}`);
+  }
+
+  // 多声明：索引仓 CI 给 warning，本地提前提示
+  const used = new Set(required.map(([perm]) => perm));
+  for (const perm of declared) {
+    if (perm === 'network:none') continue;
+    if (perm.startsWith('network:')) {
+      if (!/plugin_http_request/.test(src)) warn(`声明了权限 "${perm}" 但未检出网络调用`);
+      continue;
+    }
+    if (!used.has(perm)) warn(`声明了权限 "${perm}" 但未检出对应调用`);
   }
 }
 

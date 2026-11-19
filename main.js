@@ -76,10 +76,15 @@ const UI_CSS = `
   text-align: center;
 }
 .sp-toast {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11px;
   color: var(--color-accent-primary-default, #3b82f6);
   animation: sp-fade 160ms ease-out;
 }
+.sp-toast-error { color: var(--color-danger, #d1242f); }
 .sp-spinner {
   display: inline-block;
   width: 11px;
@@ -180,7 +185,7 @@ const UI_CSS = `
   font-size: 11.5px;
   cursor: pointer;
 }
-.sp-list { flex: 1; overflow-y: auto; padding: 6px 6px 8px; }
+.sp-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 6px 6px 8px; }
 .sp-group {
   padding: 8px 8px 5px;
   color: var(--color-text-tertiary, #8b949e);
@@ -320,7 +325,8 @@ function Read-Meta {
   param([string]$Path)
   $desc = ''
   $hint = ''
-  $lines = @(Get-Content -LiteralPath $Path -TotalCount 80 -Encoding UTF8 -ErrorAction SilentlyContinue)
+  # 读前 160 行足以覆盖 frontmatter；超长 frontmatter 的命令极少数会丢 description
+  $lines = @(Get-Content -LiteralPath $Path -TotalCount 160 -Encoding UTF8 -ErrorAction SilentlyContinue)
   if ($lines.Count -eq 0) { return [pscustomobject]@{ description = ''; hint = '' } }
   $i = 0
   while ($i -lt $lines.Count -and [string]::IsNullOrWhiteSpace([string]$lines[$i])) { $i++ }
@@ -372,7 +378,13 @@ function Add-Row {
 
 function Strip-Rel {
   param([string]$Root, [string]$Full)
-  $rel = $Full.Substring($Root.Length)
+  # 大小写无关地剥掉根前缀；短名/长名不一致时回退到文件名，避免切出半截路径
+  $root = ($Root -replace '[\\/]+$', '')
+  if ($Full.Length -gt $root.Length -and $Full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+    $rel = $Full.Substring($root.Length)
+  } else {
+    $rel = [IO.Path]::GetFileName($Full)
+  }
   if ($rel.StartsWith('\') -or $rel.StartsWith('/')) { $rel = $rel.Substring(1) }
   if ($rel.ToLowerInvariant().EndsWith('.md')) { $rel = $rel.Substring(0, $rel.Length - 3) }
   return ($rel -replace '[\\/]', ':')
@@ -381,14 +393,14 @@ function Strip-Rel {
 # --- 用户级 ---
 $userCmd = Join-Path $claudeDir 'commands'
 if (Test-Path -LiteralPath $userCmd) {
-  foreach ($f in @(Get-ChildItem -LiteralPath $userCmd -Recurse -File -Filter *.md -ErrorAction SilentlyContinue)) {
+  foreach ($f in @(Get-ChildItem -LiteralPath $userCmd -Recurse -File -Filter *.md -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
     $meta = Read-Meta $f.FullName
     Add-Row 'user-command' ('/' + (Strip-Rel $userCmd $f.FullName)) $meta.description $meta.hint '' '' $f.FullName
   }
 }
 $userSkill = Join-Path $claudeDir 'skills'
 if (Test-Path -LiteralPath $userSkill) {
-  foreach ($d in @(Get-ChildItem -LiteralPath $userSkill -Directory -ErrorAction SilentlyContinue)) {
+  foreach ($d in @(Get-ChildItem -LiteralPath $userSkill -Directory -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
     $md = Join-Path $d.FullName 'SKILL.md'
     if (-not (Test-Path -LiteralPath $md)) { continue }
     $meta = Read-Meta $md
@@ -400,9 +412,9 @@ if (Test-Path -LiteralPath $userSkill) {
 $cacheRoot = Join-Path $claudeDir 'plugins\cache'
 if (Test-Path -LiteralPath $cacheRoot) {
   $entries = New-Object System.Collections.ArrayList
-  foreach ($market in @(Get-ChildItem -LiteralPath $cacheRoot -Directory -ErrorAction SilentlyContinue)) {
-    foreach ($plugin in @(Get-ChildItem -LiteralPath $market.FullName -Directory -ErrorAction SilentlyContinue)) {
-      $versions = @(Get-ChildItem -LiteralPath $plugin.FullName -Directory -ErrorAction SilentlyContinue)
+  foreach ($market in @(Get-ChildItem -LiteralPath $cacheRoot -Directory -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+    foreach ($plugin in @(Get-ChildItem -LiteralPath $market.FullName -Directory -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+      $versions = @(Get-ChildItem -LiteralPath $plugin.FullName -Directory -Attributes !ReparsePoint -ErrorAction SilentlyContinue)
       if ($versions.Count -eq 0) { continue }
       $latest = $versions | Sort-Object LastWriteTime -Descending | Select-Object -First 1
       [void]$entries.Add([pscustomobject]@{ market = $market.Name; plugin = $plugin.Name; dir = $latest.FullName })
@@ -411,14 +423,14 @@ if (Test-Path -LiteralPath $cacheRoot) {
   foreach ($e in $entries) {
     $cmdRoot = Join-Path $e.dir 'commands'
     if (Test-Path -LiteralPath $cmdRoot) {
-      foreach ($f in @(Get-ChildItem -LiteralPath $cmdRoot -Recurse -File -Filter *.md -ErrorAction SilentlyContinue)) {
+      foreach ($f in @(Get-ChildItem -LiteralPath $cmdRoot -Recurse -File -Filter *.md -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
         $meta = Read-Meta $f.FullName
         Add-Row 'plugin-command' ('/' + $e.plugin + ':' + (Strip-Rel $cmdRoot $f.FullName)) $meta.description $meta.hint $e.plugin $e.market $f.FullName
       }
     }
     $skillRoot = Join-Path $e.dir 'skills'
     if (Test-Path -LiteralPath $skillRoot) {
-      foreach ($d in @(Get-ChildItem -LiteralPath $skillRoot -Directory -ErrorAction SilentlyContinue)) {
+      foreach ($d in @(Get-ChildItem -LiteralPath $skillRoot -Directory -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
         $md = Join-Path $d.FullName 'SKILL.md'
         if (-not (Test-Path -LiteralPath $md)) { continue }
         $meta = Read-Meta $md
@@ -452,7 +464,7 @@ $result | ConvertTo-Json -Depth 6 -Compress
 `;
 
 export default function activate(ctx) {
-  const { createElement: h, useState, useEffect, useRef } = ctx.react;
+  const { createElement: h, useEffect, useRef } = ctx.react;
 
   function errorText(e) {
     if (!e) return '未知错误';
@@ -477,8 +489,8 @@ export default function activate(ctx) {
     },
     listeners: new Set(),
     set(patch) {
-      this.snap = Object.assign({}, this.snap, patch);
-      for (const fn of Array.from(this.listeners)) {
+      store.snap = Object.assign({}, store.snap, patch);
+      for (const fn of Array.from(store.listeners)) {
         try {
           fn();
         } catch {
@@ -486,19 +498,19 @@ export default function activate(ctx) {
         }
       }
     },
-    subscribe(fn) {
-      this.listeners.add(fn);
+    // 箭头函数：useSyncExternalStore 要求 subscribe 是稳定引用，不能依赖 this
+    subscribe: (fn) => {
+      store.listeners.add(fn);
       return () => {
-        this.listeners.delete(fn);
+        store.listeners.delete(fn);
       };
     },
+    getSnapshot: () => store.snap,
   };
 
-  function useSnap() {
-    const [snap, setSnap] = useState(store.snap);
-    useEffect(() => store.subscribe(() => setSnap(store.snap)), []);
-    return snap;
-  }
+  // 宿主 React 提供 useSyncExternalStore（已上架插件同样使用），
+  // 避免 useState 初值到 useEffect 订阅之间漏掉一次 store 更新。
+  const useSnap = () => ctx.react.useSyncExternalStore(store.subscribe, store.getSnapshot);
 
   function normalizeItems(raw) {
     const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
@@ -551,9 +563,14 @@ export default function activate(ctx) {
   }
 
   function orderItems(items) {
+    // 未知来源排到最后，避免未来新增 kind 时顶到用户命令前面
+    const rank = (kind) => {
+      const i = GROUP_ORDER.indexOf(kind);
+      return i < 0 ? GROUP_ORDER.length : i;
+    };
     return items.slice().sort((a, b) => {
-      const oa = GROUP_ORDER.indexOf(a.kind);
-      const ob = GROUP_ORDER.indexOf(b.kind);
+      const oa = rank(a.kind);
+      const ob = rank(b.kind);
       if (oa !== ob) return oa - ob;
       return a.invoke.localeCompare(b.invoke);
     });
@@ -571,8 +588,10 @@ export default function activate(ctx) {
         args: ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
         timeoutMs: 30000,
       });
-      if (r && typeof r.code === 'number' && r.code !== 0) {
-        throw new Error(String(r.stderr || '').trim() || 'powershell 退出码 ' + r.code);
+      // 宿主返回值存在数字码与字符串码两种形态
+      const code = r ? r.code : undefined;
+      if (code !== undefined && code !== null && code !== 0 && code !== '0') {
+        throw new Error(String(r.stderr || '').trim() || 'powershell 退出码 ' + code);
       }
       const text = String((r && r.stdout) || '')
         .replace(/^﻿/, '')
@@ -608,12 +627,18 @@ export default function activate(ctx) {
   function insert(invoke) {
     try {
       ctx.composer.setDraft(invoke + ' ');
-      store.set({ open: false, query: '', activeIndex: 0, toast: '已写入 ' + invoke });
-      setTimeout(() => {
-        if (store.snap.toast) store.set({ toast: '' });
-      }, 2200);
+      store.set({ open: false, query: '', activeIndex: 0, toast: '' });
     } catch (e) {
-      store.set({ error: '写入输入框失败：' + errorText(e) });
+      store.set({
+        open: false,
+        query: '',
+        activeIndex: 0,
+        toast: '写入失败',
+        error: '写入输入框失败：' + errorText(e),
+      });
+      setTimeout(() => {
+        if (store.snap.toast === '写入失败') store.set({ toast: '' });
+      }, 3000);
     }
   }
 
@@ -660,7 +685,8 @@ export default function activate(ctx) {
         saved = null;
       }
     }
-    if (saved && saved.version === 1 && saved.items) {
+    // 空结果不当作有效缓存：否则 ~/.claude 尚未生成时，10 分钟内新装的命令都看不到
+    if (saved && saved.version === 1 && Array.isArray(saved.items) && saved.items.length) {
       store.set({
         status: 'ok',
         items: normalizeItems(saved.items),
@@ -708,7 +734,7 @@ export default function activate(ctx) {
     return h(
       'span',
       { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
-      h('style', { key: 'sp-style' }, UI_CSS),
+      inlineCss ? h('style', { key: 'sp-style' }, UI_CSS) : null,
       h(
         'button',
         {
@@ -722,7 +748,16 @@ export default function activate(ctx) {
         h('span', null, '命令'),
         count ? h('span', { className: 'sp-count' }, String(count)) : null,
       ),
-      snap.toast ? h('span', { className: 'sp-toast' }, snap.toast) : null,
+      snap.toast
+        ? h(
+            'span',
+            {
+              className: 'sp-toast' + (snap.toast === '写入失败' ? ' sp-toast-error' : ''),
+              title: snap.error || snap.toast,
+            },
+            snap.toast,
+          )
+        : null,
     );
   }
 
@@ -744,9 +779,29 @@ export default function activate(ctx) {
       return undefined;
     }, [open, active, snap.query, ordered.length]);
 
+    // 面板打开期间锁住宿主页面滚动，关闭或卸载时恢复原值
+    useEffect(() => {
+      if (!open) return undefined;
+      const body = typeof document !== 'undefined' && document.body ? document.body : null;
+      const prev = body ? body.style.overflow : '';
+      if (body) body.style.overflow = 'hidden';
+      return () => {
+        if (body) body.style.overflow = prev;
+      };
+    }, [open]);
+
     if (!open) return null;
 
     function onKeyDown(e) {
+      // Esc 挂在面板容器上：焦点落在关闭按钮或列表项时同样生效
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        store.set({ open: false });
+        return;
+      }
+      // 焦点在按钮上时把 Enter 留给按钮自身的 click，避免一次按键触发两次插入
+      const onControl = e.target && e.target.tagName && e.target.tagName !== 'INPUT';
+      if (onControl && (e.key === 'Enter' || e.key === ' ')) return;
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         if (ordered.length) store.set({ activeIndex: Math.min(active + 1, ordered.length - 1) });
@@ -756,9 +811,6 @@ export default function activate(ctx) {
       } else if (e.key === 'Enter') {
         e.preventDefault();
         if (ordered[active]) insert(ordered[active].invoke);
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        store.set({ open: false });
       }
     }
 
@@ -781,7 +833,8 @@ export default function activate(ctx) {
               if (store.snap.activeIndex !== idx) store.set({ activeIndex: idx });
             },
             onClick: () => insert(it.invoke),
-            title: it.path || it.invoke,
+            // 不把本机绝对路径暴露在悬停提示里（含用户名）
+            title: it.description ? it.invoke + ' — ' + it.description : it.invoke,
           },
           h('span', { className: 'sp-invoke' }, it.invoke),
           snap.settings.showDesc && it.description
@@ -828,7 +881,14 @@ export default function activate(ctx) {
       },
       h(
         'div',
-        { className: 'sp-panel', role: 'dialog', 'aria-label': 'Claude 斜杠命令' },
+        {
+          className: 'sp-panel',
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-label': 'Claude 斜杠命令',
+          onKeyDown,
+        },
+        inlineCss ? h('style', { key: 'sp-style' }, UI_CSS) : null,
         h(
           'div',
           { className: 'sp-head' },
@@ -839,7 +899,6 @@ export default function activate(ctx) {
             placeholder: '搜索命令或描述…',
             value: snap.query,
             onChange: (e) => store.set({ query: e.target.value, activeIndex: 0 }),
-            onKeyDown,
           }),
           h('button', { className: 'sp-close', title: '关闭', onClick: () => store.set({ open: false }) }, '×'),
         ),
@@ -865,7 +924,9 @@ export default function activate(ctx) {
     const snap = useSnap();
     const s = snap.settings;
     const toggle = (key) => {
-      void writeSettings(Object.assign({}, s, { [key]: !s[key] }));
+      // 读实时快照而不是本次渲染的闭包值：连续点两个开关时不会互相覆盖
+      const cur = store.snap.settings;
+      void writeSettings(Object.assign({}, cur, { [key]: !cur[key] }));
     };
 
     function row(key, title, desc) {
@@ -884,11 +945,18 @@ export default function activate(ctx) {
 
     const roots = snap.roots || {};
     const counts = snap.counts || {};
+    // 诊断区把 home 前缀缩成 ~，避免把用户名暴露在截图里
+    const shortPath = (p) => {
+      if (!p) return '未解析';
+      const home = roots.home ? String(roots.home) : '';
+      const text = String(p);
+      return home && text.indexOf(home) === 0 ? '~' + text.slice(home.length) : text;
+    };
 
     return h(
       'div',
       { className: 'sp-settings' },
-      h('style', null, UI_CSS),
+      inlineCss ? h('style', { key: 'sp-style' }, UI_CSS) : null,
       h(
         'div',
         { className: 'sp-setting-desc' },
@@ -909,13 +977,24 @@ export default function activate(ctx) {
         'div',
         { className: 'sp-diag' },
         '插件命令 ' + (counts.plugins || 0) + ' · 用户 ' + (counts.user || 0) + '\n' +
-          'CLI 目录：' + (roots.claude || '未解析') + '\n' +
-          '插件缓存：' + (roots.plugins || '未解析'),
+          'CLI 目录：' + shortPath(roots.claude) + '\n' +
+          '插件缓存：' + shortPath(roots.plugins),
       ),
     );
   }
 
+  // 样式优先由宿主主题注入一次（其它已上架插件同样做法）；
+  // 老宿主没有 ctx.theme 时回退到各组件内联 <style>。
+  let inlineCss = !(ctx.theme && typeof ctx.theme.injectCss === 'function');
   const disposers = [];
+  if (!inlineCss) {
+    try {
+      const disposeCss = ctx.theme.injectCss(UI_CSS);
+      if (typeof disposeCss === 'function') disposers.push(disposeCss);
+    } catch {
+      inlineCss = true;
+    }
+  }
   disposers.push(ctx.ui.registerComposerStatusItem({ key: PLUGIN_ID, component: StatusChip, order: 10 }));
   disposers.push(ctx.ui.registerOverlay({ key: PLUGIN_ID + '-overlay', component: Overlay, order: 10 }));
   disposers.push(

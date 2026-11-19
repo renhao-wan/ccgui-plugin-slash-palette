@@ -1,8 +1,12 @@
 // 冒烟测试：用最小 React 替身渲染三个入口，bridge 真实调用 PowerShell。
 // 不依赖宿主；只验证「能跑通、扫描有结果、写入参数正确」。
+// 替身不模拟重渲染，因此交互修复（连续开关、按钮焦点下按 Esc）
+// 通过直接调用 props 回调覆盖，不覆盖真实 React 生命周期。
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 
 const PLUGIN = new URL('../main.js', import.meta.url).href;
+const MANIFEST = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
 
 const states = new Map();
 let stateIdx = 0;
@@ -32,12 +36,15 @@ const fakeReact = {
   },
   useCallback: (fn) => fn,
   useMemo: (fn) => fn(),
+  // 组件订阅 store 时直接取当前快照；不模拟 store 变更后的重渲染
+  useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),
 };
 
 const storageData = new Map();
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const drafts = [];
 const execCalls = [];
+const injectedCss = [];
 
 let statusItem = null;
 let overlay = null;
@@ -47,7 +54,13 @@ let paletteCommand = null;
 const ctx = {
   react: fakeReact,
   pluginId: 'slash-palette',
-  version: '1.0.0',
+  version: MANIFEST.version,
+  theme: {
+    injectCss: (css) => {
+      injectedCss.push(css);
+      return () => {};
+    },
+  },
   storage: {
     get: async (k) => (storageData.has(k) ? clone(storageData.get(k)) : null),
     set: async (k, v) => {
@@ -195,8 +208,10 @@ const filteredText = textOf(filteredTree);
 const filteredInput = byClass(filteredTree, 'sp-search');
 
 // ---- 第四段：Enter 写入草稿 ----
-if (filteredInput && filteredInput.props.onKeyDown) {
-  filteredInput.props.onKeyDown({ key: 'Enter', preventDefault() {} });
+// Enter 处理器挂在面板容器上（而不是搜索框），焦点在任意子元素时都能触发
+const filteredPanel = byClass(filteredTree, 'sp-panel');
+if (filteredPanel && filteredPanel.props.onKeyDown) {
+  filteredPanel.props.onKeyDown({ key: 'Enter', preventDefault() {} });
 }
 const lastDraft = drafts[drafts.length - 1] || '';
 
@@ -208,6 +223,34 @@ const settingsText = textOf(settingsTree);
 paletteCommand.run();
 const reopened = renderFresh(overlay.component).tree;
 const reopenedSearch = byClass(reopened, 'sp-search');
+
+// ---- 第七段：Esc 在面板容器上生效（模拟焦点不在搜索框）----
+const reopenedPanel = byClass(reopened, 'sp-panel');
+if (reopenedPanel && reopenedPanel.props.onKeyDown) {
+  reopenedPanel.props.onKeyDown({ key: 'Escape', preventDefault() {} });
+}
+const afterEsc = renderFresh(overlay.component).tree;
+const escClosed = afterEsc === null;
+
+// ---- 第八段：连续切换两个开关不互相覆盖 ----
+function checkboxes(tree) {
+  const out = [];
+  walk(tree, (n) => {
+    if (n.type === 'input' && n.props && n.props.type === 'checkbox') out.push(n);
+  });
+  return out;
+}
+const firstBoxes = checkboxes(renderFresh(settingsSection.component).tree);
+if (firstBoxes[0]) firstBoxes[0].props.onChange(); // 关闭「插件命令与技能」
+const secondBoxes = checkboxes(renderFresh(settingsSection.component).tree);
+if (secondBoxes[2]) secondBoxes[2].props.onChange(); // 打开「内置命令」
+const thirdBoxes = checkboxes(renderFresh(settingsSection.component).tree);
+const togglesIndependent = !!(
+  thirdBoxes[0] &&
+  thirdBoxes[0].props.checked === false &&
+  thirdBoxes[2] &&
+  thirdBoxes[2].props.checked === true
+);
 
 // ---- 第七段：卸载清理 ----
 let disposeOk = true;
@@ -252,6 +295,9 @@ const checks = [
   ['设置页渲染出诊断路径', settingsText.indexOf('CLI 目录') >= 0],
 
   ['命令面板入口能重新打开面板', !!reopenedSearch],
+  ['面板容器响应 Esc（焦点不在搜索框也有效）', escClosed],
+  ['连续切换两个开关互不覆盖', togglesIndependent],
+  ['样式通过宿主主题注入一次', injectedCss.length === 1 && injectedCss[0].indexOf('.sp-chip') >= 0],
   ['卸载函数可安全执行', disposeOk],
 ];
 

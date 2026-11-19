@@ -1,11 +1,11 @@
 {
   "id": "slash-palette",
   "name": "Claude 斜杠命令",
-  "version": "1.0.1",
+  "version": "0.1.0",
   "sdkVersion": "^0.3",
   "minAppVersion": "1.0.4",
   "author": "renhao-wan",
-  "description": "仅支持 Claude Code：点一下输入框旁的「/ 命令」，搜索并插入插件命令与技能，不用再记命令名。",
+  "description": "仅支持 Claude Code：点一下输入框旁的「/ 命令」，搜索并插入插件与用户的命令、技能，不用再记命令名。",
   "repo": "renhao-wan/ccgui-plugin-slash-palette",
   "icon": "docs/icon.png",
   "license": "MIT",
@@ -18,6 +18,7 @@
     "ui:settings-section",
     "composer:draft",
     "exec:powershell",
+    "theme",
     "storage"
   ]
 }
