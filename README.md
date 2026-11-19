@@ -26,6 +26,7 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 ## 功能
 
 - 状态行「/ 命令」按钮，点击打开居中面板；CC GUI 命令面板搜「斜杠」也能唤起。
+- 只列 Claude Code 已启用的插件命令与技能，避免选到不可用的命令。
 - 搜索命令名或 frontmatter 里的 `description`。
 - 键盘 `↑` `↓` 选择、`Enter` 写入、`Esc` 关闭；鼠标同样可用。
 - 按来源分组，可在设置页逐项开关。
@@ -35,13 +36,13 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 
 | 来源 | 路径 | 调用名 |
 |---|---|---|
-| 插件命令 | `~/.claude/plugins/cache/*/*/*/commands/**/*.md` | `/插件名:命令名` |
-| 插件技能 | `~/.claude/plugins/cache/*/*/*/skills/*/SKILL.md` | `/插件名:技能名` |
+| 插件命令 | Claude Code 记录的插件安装目录（`installed_plugins.json` 的 `installPath`） | `/插件名:命令名` |
+| 插件技能 | 同上 | `/插件名:技能名` |
 | 用户命令 | `~/.claude/commands/**/*.md` | `/命令名` |
 | 用户技能 | `~/.claude/skills/*/SKILL.md` | `/技能名` |
 | 内置命令（默认关闭） | 插件内置 | `/help` 等 |
 
-同一插件在缓存里存在多个版本目录时，只取最近写入的那一个。
+只展示 Claude Code **已启用**的插件：启用状态读取 `~/.claude/settings.json` 的 `enabledPlugins`，装了但没启用的插件不会出现在列表里。没有 `installed_plugins.json` 时回退到遍历 `plugins/cache`，同一插件有多个缓存版本时以记录的安装目录为准，其次按修改时间与版本号选择。
 
 ## 已知限制
 
@@ -50,6 +51,7 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 3. **弹层是居中浮层**：SDK 不暴露输入框坐标，插件也不能读宿主 DOM，无法做成紧贴输入框的下拉。
 4. **Windows 专用**：扫描走 `exec:powershell`。macOS / Linux 需要另加 `exec:sh` 与第二套脚本，当前版本未实现。
 5. **首次打开有扫描延迟**：缓存缺失或过期时，打开面板（或设置页点「立即刷新」）会调用 PowerShell 扫描本机命令目录，通常 1–2 秒；之后 10 分钟内直接读缓存。
+6. **只认用户级启用清单**：不读取项目级 `.claude/settings.json` 的 `enabledPlugins`，只在某个项目里启用的插件不会显示。
 
 ## 权限
 

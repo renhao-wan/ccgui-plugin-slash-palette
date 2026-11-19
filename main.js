@@ -408,18 +408,62 @@ if (Test-Path -LiteralPath $userSkill) {
   }
 }
 
-# --- 插件缓存：同一插件只取最近写入的版本目录 ---
+# --- 插件：优先用 Claude Code 记录的安装路径与启用清单 ---
+# installed_plugins.json 的 installPath 是当前真正加载的目录（版本名可能是 commit hash），
+# 比按目录名或修改时间猜版本可靠；settings.json 的 enabledPlugins 决定插件命令是否可用。
 $cacheRoot = Join-Path $claudeDir 'plugins\cache'
-if (Test-Path -LiteralPath $cacheRoot) {
-  $entries = New-Object System.Collections.ArrayList
+$entries = New-Object System.Collections.ArrayList
+$installedFile = Join-Path $claudeDir 'plugins\installed_plugins.json'
+$settingsFile = Join-Path $claudeDir 'settings.json'
+$installed = $null
+$enabledPlugins = $null
+
+if (Test-Path -LiteralPath $installedFile) {
+  try {
+    $rawInstalled = Get-Content -LiteralPath $installedFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($rawInstalled -and $rawInstalled.plugins) { $installed = $rawInstalled.plugins }
+  } catch {}
+}
+if (Test-Path -LiteralPath $settingsFile) {
+  try {
+    $cfg = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($cfg -and $cfg.PSObject.Properties['enabledPlugins']) { $enabledPlugins = $cfg.enabledPlugins }
+  } catch {}
+}
+
+if ($installed) {
+  foreach ($prop in $installed.PSObject.Properties) {
+    $key = [string]$prop.Name
+    # 有启用清单时只保留显式启用的插件，避免列出装了但没开的命令
+    if ($enabledPlugins -ne $null) {
+      $ep = $enabledPlugins.PSObject.Properties[$key]
+      if (-not $ep -or $ep.Value -ne $true) { continue }
+    }
+    $list = @($prop.Value)
+    if ($list.Count -eq 0) { continue }
+    $pick = $null
+    foreach ($e in $list) { if ($e.scope -eq 'user') { $pick = $e; break } }
+    if (-not $pick) { $pick = $list[0] }
+    $dir = [string]$pick.installPath
+    if ([string]::IsNullOrWhiteSpace($dir) -or -not (Test-Path -LiteralPath $dir)) { continue }
+    $at = $key.LastIndexOf('@')
+    $pluginName = if ($at -gt 0) { $key.Substring(0, $at) } else { $key }
+    $marketName = if ($at -gt 0) { $key.Substring($at + 1) } else { '' }
+    [void]$entries.Add([pscustomobject]@{ market = $marketName; plugin = $pluginName; dir = $dir })
+  }
+} elseif (Test-Path -LiteralPath $cacheRoot) {
+  # 回退：没有安装清单时遍历缓存。时间相同则按语义版本、最后按目录名兜底。
   foreach ($market in @(Get-ChildItem -LiteralPath $cacheRoot -Directory -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
     foreach ($plugin in @(Get-ChildItem -LiteralPath $market.FullName -Directory -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
       $versions = @(Get-ChildItem -LiteralPath $plugin.FullName -Directory -Attributes !ReparsePoint -ErrorAction SilentlyContinue)
       if ($versions.Count -eq 0) { continue }
-      $latest = $versions | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+      $latest = $versions |
+        Sort-Object @{ Expression = { $_.LastWriteTime } }, @{ Expression = { $vm = [regex]::Match($_.Name, '\d+\.\d+\.\d+'); if ($vm.Success) { [version]$vm.Value } else { [version]'0.0.0' } } }, @{ Expression = { $_.Name } } -Descending |
+        Select-Object -First 1
       [void]$entries.Add([pscustomobject]@{ market = $market.Name; plugin = $plugin.Name; dir = $latest.FullName })
     }
   }
+}
   foreach ($e in $entries) {
     $cmdRoot = Join-Path $e.dir 'commands'
     if (Test-Path -LiteralPath $cmdRoot) {
@@ -438,7 +482,6 @@ if (Test-Path -LiteralPath $cacheRoot) {
       }
     }
   }
-}
 
 $order = @{
   'user-command' = 0; 'user-skill' = 1;
