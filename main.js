@@ -1,4 +1,4 @@
-// 斜杠命令面板：扫描本机 Claude Code 命令源，搜索并写入输入框草稿。
+// Claude 斜杠命令：仅扫描本机 Claude Code 的命令源，搜索并写入输入框草稿。
 // 单文件 ESM：不能有 import、JSX、eval / new Function。
 // 写入只能经 ctx.composer.setDraft；插件无法读取输入框内容或监听按键。
 
@@ -787,8 +787,8 @@ export default function activate(ctx) {
         {
           type: 'button',
           className: 'sp-chip' + (snap.open ? ' sp-chip-open' : ''),
-          title: '打开斜杠命令面板',
-          'aria-label': '打开斜杠命令面板',
+          title: '打开 Claude 斜杠命令',
+          'aria-label': '打开 Claude 斜杠命令',
           onClick: () => (snap.open ? store.set({ open: false }) : openPalette()),
         },
         busy ? h('span', { className: 'sp-spinner' }) : h('span', { className: 'sp-slash' }, '/'),
@@ -901,7 +901,7 @@ export default function activate(ctx) {
       },
       h(
         'div',
-        { className: 'sp-panel', role: 'dialog', 'aria-label': '斜杠命令面板' },
+        { className: 'sp-panel', role: 'dialog', 'aria-label': 'Claude 斜杠命令' },
         h(
           'div',
           { className: 'sp-head' },
@@ -965,7 +965,7 @@ export default function activate(ctx) {
       h(
         'div',
         { className: 'sp-setting-desc' },
-        '在输入框状态行的「/ 命令」按钮里搜索并插入命令。插件只能写入草稿，不能读取输入框内容，也不会自动发送。',
+        '仅扫描 Claude Code 的命令目录。在输入框状态行的「/ 命令」按钮里搜索并插入命令；插件只能写入草稿，不能读取输入框内容，也不会自动发送。',
       ),
       row('plugins', '插件命令与技能', '读取 ~/.claude/plugins/cache 下的 commands/*.md 与 skills/*/SKILL.md。'),
       row('user', '用户命令与技能', '读取 ~/.claude/commands/*.md 与 ~/.claude/skills/*/SKILL.md。'),
@@ -996,7 +996,7 @@ export default function activate(ctx) {
   disposers.push(
     ctx.ui.registerSettingsSection({
       key: PLUGIN_ID,
-      label: () => '斜杠命令面板',
+      label: () => 'Claude 斜杠命令',
       icon: Icon,
       component: SettingsSection,
     }),
@@ -1004,8 +1004,8 @@ export default function activate(ctx) {
   disposers.push(
     ctx.ui.registerCommand({
       key: PLUGIN_ID,
-      title: () => '斜杠命令面板',
-      keywords: () => ['slash', 'command', '命令', '斜杠', 'prompt'],
+      title: () => 'Claude 斜杠命令',
+      keywords: () => ['claude', 'claude-code', 'slash', 'command', '命令', '斜杠', 'prompt'],
       run: openPalette,
     }),
   );

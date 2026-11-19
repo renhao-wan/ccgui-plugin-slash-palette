@@ -222,8 +222,8 @@ const checks = [
   ['注册了 overlay', !!overlay],
   ['注册了设置页', !!settingsSection],
   ['注册了命令面板入口', !!paletteCommand],
-  ['设置页标题为中文', settingsSection.label() === '斜杠命令面板'],
-  ['命令标题为中文', paletteCommand.title() === '斜杠命令面板'],
+  ['设置页标题为中文', settingsSection.label() === 'Claude 斜杠命令'],
+  ['命令标题为中文', paletteCommand.title() === 'Claude 斜杠命令'],
 
   ['扫描耗时 < 15 秒', scanMs < 15000],
   ['状态按钮渲染出「命令」', chipText.indexOf('命令') >= 0],

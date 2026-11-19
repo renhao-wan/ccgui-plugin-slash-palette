@@ -1,6 +1,17 @@
-# 斜杠命令面板（CC GUI 插件）
+# Claude 斜杠命令（CC GUI 插件）
 
 在 CC GUI 输入框状态行加一个「/ 命令」按钮：点开后搜索本机 Claude Code 的插件命令、技能与用户命令，回车即把 `/命令 ` 写进输入框。
+
+## 适用范围
+
+**仅支持 Claude Code。** 不扫描也不写入 Codex、OpenCode、Gemini、CodeBuddy、Cursor、Kimi、Grok、Qoder、MiniMax、OMP、DSH、AGY、Pi 等引擎的命令。
+
+原因有两条：
+
+1. **插件拿不到当前会话的引擎。** SDK 没有 `getCurrentEngine()`；`registerRuntimeSwitchHooks` 只能观察之后的切换事件，插件激活时无法判断当前会话用的是哪个引擎。
+2. **写错引擎的命令是负收益。** `setDraft` 写入的是当前会话输入框；把 OpenCode 的命令写进 Codex 会话只会报错。
+
+如果宿主后续开放当前引擎或补全接口，再评估扩展。
 
 ## 为什么不是「输入 / 时自动补全」
 
@@ -76,8 +87,8 @@ node scripts/smoke.mjs               # 真实调用 PowerShell，验证扫描与
 推送与 `manifest.json` 的 `version` 相同的 tag（无 `v` 前缀也可）触发 GitHub Actions：
 
 ```bash
-git tag 1.0.0
-git push origin 1.0.0
+git tag 1.0.1
+git push origin 1.0.1
 ```
 
 流水线会校验 manifest、比对 tag、生成 `checksums.txt`，并把 `main.js`、`manifest.json`、`checksums.txt` 附到 Release。
