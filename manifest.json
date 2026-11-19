@@ -1,0 +1,25 @@
+{
+  "id": "slash-palette",
+  "name": "斜杠命令面板",
+  "version": "1.0.0",
+  "sdkVersion": "^0.3",
+  "minAppVersion": "1.0.4",
+  "author": "renhao-wan",
+  "description": "点一下输入框旁的「/ 命令」，搜索并插入 Claude Code 的插件命令与技能，不用再记命令名。",
+  "repo": "renhao-wan/ccgui-plugin-slash-palette",
+  "icon": "docs/icon.png",
+  "license": "MIT",
+  "keywords": ["slash", "command", "claude", "code", "palette", "skill"],
+  "tier": "js",
+  "permissions": [
+    "ui:composer-status",
+    "ui:overlay",
+    "ui:command",
+    "ui:settings-section",
+    "composer:draft",
+    "exec:powershell",
+    "storage",
+    "host:workspace",
+    "workspace.metadata.read"
+  ]
+}

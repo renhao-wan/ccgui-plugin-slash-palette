@@ -1,0 +1,11 @@
+{
+  "name": "ccgui-plugin-slash-palette",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CC GUI 插件：搜索并插入 Claude Code 斜杠命令",
+  "license": "MIT",
+  "scripts": {
+    "validate": "node scripts/validate-manifest.mjs"
+  }
+}
