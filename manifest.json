@@ -1,7 +1,7 @@
 {
   "id": "slash-palette",
   "name": "Claude 斜杠命令",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "sdkVersion": "^0.3",
   "minAppVersion": "1.0.4",
   "author": "renhao-wan",
@@ -19,6 +19,7 @@
     "composer:draft",
     "exec:powershell",
     "theme",
-    "storage"
+    "storage",
+    "network:ccgui-feedback.2653990378.workers.dev"
   ]
 }

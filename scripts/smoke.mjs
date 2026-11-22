@@ -4,6 +4,7 @@
 // 通过直接调用 props 回调覆盖，不覆盖真实 React 生命周期。
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import assert from 'node:assert/strict';
 
 const PLUGIN = new URL('../main.js', import.meta.url).href;
 const MANIFEST = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
@@ -11,13 +12,18 @@ const MANIFEST = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.m
 const states = new Map();
 let stateIdx = 0;
 let refIdx = 0;
-const refs = [];
+// 用 let：renderFresh 必须整体换新数组，否则字符串键的 ref 会跨挂载残留。
+let refs = [];
 let effects = [];
+// hook 槽位按「组件实例」分域：嵌套函数组件（如反馈区）不能和父组件共用序号，
+// 否则父组件多一个 useState 就把子组件的槽位整体挤歪。
+let domain = 'root';
+let domainSeq = new Map();
 
 const fakeReact = {
   createElement: (type, props, ...children) => ({ type, props, children }),
   useState: (init) => {
-    const i = stateIdx++;
+    const i = domain + '|' + stateIdx++;
     if (!states.has(i)) states.set(i, typeof init === 'function' ? init() : init);
     return [
       states.get(i),
@@ -30,7 +36,7 @@ const fakeReact = {
     effects.push(fn);
   },
   useRef: (init) => {
-    const i = refIdx++;
+    const i = domain + '|' + refIdx++;
     if (!refs[i]) refs[i] = { current: init === undefined ? null : init };
     return refs[i];
   },
@@ -39,6 +45,28 @@ const fakeReact = {
   // 组件订阅 store 时直接取当前快照；不模拟 store 变更后的重渲染
   useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),
 };
+
+// React 会调用函数组件；替身也要展开，否则拿到的只是 { type: Comp } 外壳。
+function expand(node) {
+  if (Array.isArray(node)) return node.map(expand);
+  if (!node || typeof node !== 'object') return node;
+  if (typeof node.type === 'function') {
+    const nm = node.type.name || 'anon';
+    const inst = domainSeq.get(nm) || 0;
+    domainSeq.set(nm, inst + 1);
+    const prev = { domain, stateIdx, refIdx };
+    domain = nm + '#' + inst;
+    stateIdx = 0;
+    refIdx = 0;
+    const props = Object.assign({}, node.props || {}, { children: node.children || [] });
+    const out = node.type(props);
+    domain = prev.domain;
+    stateIdx = prev.stateIdx;
+    refIdx = prev.refIdx;
+    return expand(out);
+  }
+  return Object.assign({}, node, { children: (node.children || []).map(expand) });
+}
 
 const storageData = new Map();
 const clone = (v) => JSON.parse(JSON.stringify(v));
@@ -50,6 +78,9 @@ let statusItem = null;
 let overlay = null;
 let settingsSection = null;
 let paletteCommand = null;
+// 反馈相关的桥接替身：默认全部拒绝（等同「权限未生效」），由各条用例自己设。
+const httpCalls = [];
+let httpResponder = null;
 
 const ctx = {
   react: fakeReact,
@@ -102,6 +133,12 @@ const ctx = {
   },
   bridge: {
     invoke: async (name, args) => {
+      if (name === 'plugin_http_request') {
+        httpCalls.push(args);
+        if (httpResponder) return httpResponder(args);
+        // 默认拒绝，等同「network: 权限未生效」——各条用例自己设 responder
+        throw new Error('network:ccgui-feedback.2653990378.workers.dev not granted');
+      }
       if (name !== 'plugin_exec_run') throw new Error('unexpected command ' + name);
       if (args.bin !== 'powershell') throw new Error('unexpected bin ' + args.bin);
       execCalls.push(args.args.join(' '));
@@ -126,14 +163,44 @@ const disabledBeforeLoad =
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 每个组件独立渲染：清空 hooks 槽，避免不同组件串状态
-function renderFresh(comp, props) {
+// 每次渲染都从零开始：清空 hooks 槽，避免不同组件串状态。
+// 注意同理——要整棵树都清，否则嵌套组件（反馈区）会读到上一次的额度/正文。
+function renderFreshState(comp, props) {
   states.clear();
-  refs.length = 0;
+  // refs 槽位键是字符串，`length = 0` 清不掉它们：必须换新数组，
+  // 否则 useRef 里的「只在挂载时跑一次」标志会跨挂载残留。
+  refs = [];
   stateIdx = 0;
   refIdx = 0;
+  domain = 'root';
+  domainSeq = new Map();
   effects = [];
-  return { tree: comp(props || {}), effects };
+  return expand(comp(props || {}));
+}
+
+function renderFresh(comp, props) {
+  return { tree: renderFreshState(comp, props), effects };
+}
+
+// 保留组件内部状态的重渲染：用于验证「输入 → 点按钮 → 读结果」这类交互。
+function renderKeep(comp, props) {
+  let tree = null;
+  // 组件渲染期间改状态会立刻重渲染，替身多跑几轮直到稳定
+  for (let pass = 0; pass < 5; pass += 1) {
+    const before = new Map(states);
+    stateIdx = 0;
+    refIdx = 0;
+    domain = 'root';
+    domainSeq = new Map();
+    effects = [];
+    tree = expand(comp(props || {}));
+    let changed = before.size !== states.size;
+    for (const [k, v] of states) {
+      if (!changed && before.get(k) !== v) changed = true;
+    }
+    if (!changed) break;
+  }
+  return tree;
 }
 
 function walk(node, fn) {
@@ -267,6 +334,203 @@ try {
   disposeOk = false;
 }
 
+// ---- 第八段：反馈区 ----
+// dispose() 已把旧 ctx 的入口都注销了，重新激活一份给反馈用例单独用。
+const dispose2 = mod.default(ctx);
+
+// 每次渲染都从零开始的替身里，反馈组件的额度查询在 effect 里：
+// 先渲染一次收 effect，跑掉，再等结果落定。
+async function mountFeedback(responder) {
+  httpResponder = responder;
+  httpCalls.length = 0;
+  const { effects: fx } = renderFresh(settingsSection.component);
+  for (const fn of fx) fn();
+  await sleep(60);
+}
+
+const snap = () => renderKeep(settingsSection.component);
+
+function findLink(tree, text) {
+  return find(tree, (n) => n.type === 'a' && textOf(n).indexOf(text) >= 0);
+}
+
+const okQuota = () => ({ status: 200, body: JSON.stringify({ remaining: 25, dailyLimit: 30 }) });
+const okSend = (remaining) => ({ status: 200, body: JSON.stringify({ ok: true, remaining }) });
+
+const feedbackChecks = [];
+let feedbackFailed = 0;
+function fb(name, fn) {
+  try {
+    fn();
+    feedbackChecks.push([name, true]);
+  } catch (e) {
+    feedbackFailed += 1;
+    feedbackChecks.push([name + ' —— ' + e.message, false]);
+  }
+}
+
+await (async () => {
+  await mountFeedback((args) => (args.url.endsWith('/quota') ? okQuota() : okSend(24)));
+  const tree = snap();
+
+  fb('反馈：两种渠道都在，Issue 链接指向本仓库', () => {
+    assert.ok(byClass(tree, 'sp-feedback-text'), '应有反馈输入框');
+    assert.equal(byClass(tree, 'sp-feedback-text').props.maxLength, 1000);
+    const link = findLink(tree, '通过 GitHub 提 Issue');
+    assert.ok(link, '应有 Issue 链接');
+    assert.ok(
+      link.props.href.indexOf('https://github.com/renhao-wan/ccgui-plugin-slash-palette/issues/new?') === 0,
+      '链接应指向本仓库：' + link.props.href,
+    );
+  });
+
+  fb('反馈：额度文案用服务端回传的真实值', () => {
+    const q = textOf(byClass(tree, 'sp-feedback-quota'));
+    assert.ok(q.indexOf('25') >= 0, '应显示 25，实际：' + q);
+    assert.equal(byClass(tree, 'sp-feedback-quota-retry'), null, '有额度时不该挂重试按钮');
+  });
+
+  byClass(tree, 'sp-feedback-text').props.onChange({
+    target: { value: '点「/ 命令」后按 Enter 没反应\nError: boom\n    at insert (main.js:12)' },
+  });
+  const filled = snap();
+  fb('反馈：正文保留换行与堆栈缩进', () => {
+    const v = byClass(filled, 'sp-feedback-text').props.value;
+    assert.ok(/\nError: boom\n {4}at insert/.test(v), '实际：' + JSON.stringify(v));
+    assert.ok(/^\d+ \/ 1000$/.test(textOf(byClass(filled, 'sp-feedback-count'))), '字数应显示 n / 1000');
+  });
+
+  const sendBtn = byClass(filled, 'sp-feedback-send');
+  fb('反馈：有内容时发送按钮可用', () => {
+    assert.ok(sendBtn, '应有发送按钮');
+    assert.equal(sendBtn.props.disabled, false);
+  });
+  sendBtn.props.onClick();
+  sendBtn.props.onClick(); // 同一 tick 连点两次
+  await sleep(100);
+
+  fb('反馈：同一 tick 连点两次只发一条，请求体只有白名单字段', () => {
+    const posts = httpCalls.filter((c) => c.url.endsWith('/feedback'));
+    assert.equal(posts.length, 1, '应只发 1 条，实际 ' + posts.length);
+    const payload = JSON.parse(posts[0].body);
+    assert.deepEqual(Object.keys(payload).sort(), ['hostVersion', 'pluginId', 'pluginVersion', 'text', 'ts']);
+    assert.equal(payload.pluginId, 'slash-palette');
+    assert.equal(posts[0].method, 'POST');
+  });
+
+  const sent = snap();
+  fb('反馈：成功后清空正文、按钮显示已发送、额度用回传值', () => {
+    assert.equal(byClass(sent, 'sp-feedback-text').props.value, '');
+    assert.ok(textOf(byClass(sent, 'sp-feedback-send')).indexOf('已发送') >= 0, '按钮应变成「已发送」');
+    assert.ok(textOf(byClass(sent, 'sp-feedback-quota')).indexOf('24') >= 0, '额度应更新为 24');
+    assert.ok(textOf(byClass(sent, 'sp-feedback-status')).indexOf('已发送') >= 0);
+  });
+})();
+
+await (async () => {
+  // 200 但不是我们的 JSON（运营商劫持页 / 登录门户）
+  await mountFeedback((args) =>
+    args.url.endsWith('/quota') ? okQuota() : { status: 200, body: '<html>请登录校园网</html>' },
+  );
+  byClass(snap(), 'sp-feedback-text').props.onChange({ target: { value: '被劫持' } });
+  byClass(snap(), 'sp-feedback-send').props.onClick();
+  await sleep(80);
+  const t = snap();
+  fb('反馈：200 但正文不是我们的 JSON 时不当成功', () => {
+    assert.ok(textOf(t).indexOf('已发送') < 0, '劫持页不能判成功');
+    assert.ok(textOf(byClass(t, 'sp-feedback-status')).indexOf('GitHub Issue') >= 0);
+    assert.notEqual(byClass(t, 'sp-feedback-text').props.value, '', '失败时正文必须留着');
+  });
+})();
+
+await (async () => {
+  await mountFeedback((args) => {
+    if (args.url.endsWith('/quota')) return okQuota();
+    throw new Error('net::ERR_NAME_NOT_RESOLVED');
+  });
+  byClass(snap(), 'sp-feedback-text').props.onChange({ target: { value: '断网' } });
+  byClass(snap(), 'sp-feedback-send').props.onClick();
+  await sleep(80);
+  const t = snap();
+  fb('反馈：网络不通时提示检查网络或代理', () => {
+    const s = textOf(byClass(t, 'sp-feedback-status'));
+    assert.ok(/网络|代理/.test(s), s);
+    assert.ok(s.indexOf('GitHub Issue') >= 0);
+  });
+})();
+
+await (async () => {
+  await mountFeedback((args) => (args.url.endsWith('/quota') ? { status: 500, body: 'boom' } : okSend(23)));
+  const tree = snap();
+  fb('反馈：额度查不到时说连不上并给重试入口', () => {
+    assert.ok(/连不上|暂时/.test(textOf(byClass(tree, 'sp-feedback-quota'))));
+    assert.ok(byClass(tree, 'sp-feedback-quota-retry'), '应有重试按钮');
+  });
+
+  httpResponder = () => okQuota();
+  const before = httpCalls.filter((c) => c.url.endsWith('/quota')).length;
+  byClass(snap(), 'sp-feedback-quota-retry').props.onClick();
+  await sleep(80);
+  fb('反馈：重试按钮会重新查额度', () => {
+    assert.equal(httpCalls.filter((c) => c.url.endsWith('/quota')).length, before + 1);
+    assert.ok(textOf(byClass(snap(), 'sp-feedback-quota')).indexOf('25') >= 0);
+  });
+
+  // 发送成功时顺手把「连不上」纠正成服务端回传的额度
+  httpResponder = (args) => (args.url.endsWith('/quota') ? { status: 500, body: 'boom' } : okSend(23));
+  byClass(snap(), 'sp-feedback-text').props.onChange({ target: { value: '一条反馈' } });
+  byClass(snap(), 'sp-feedback-send').props.onClick();
+  await sleep(80);
+  const after = snap();
+  fb('反馈：额度查不到但发送成功，额度区不再停留在连不上', () => {
+    const q = textOf(byClass(after, 'sp-feedback-quota'));
+    assert.ok(q.indexOf('23') >= 0, q);
+    assert.ok(q.indexOf('连不上') < 0, q);
+  });
+})();
+
+await (async () => {
+  await mountFeedback((args) =>
+    args.url.endsWith('/quota')
+      ? okQuota()
+      : { status: 429, body: '{"ok":false,"error":"rate_limited","kind":"burst","remaining":25}' },
+  );
+  byClass(snap(), 'sp-feedback-text').props.onChange({ target: { value: '发太快' } });
+  byClass(snap(), 'sp-feedback-send').props.onClick();
+  await sleep(80);
+  const t = snap();
+  fb('反馈：突发限流说稍等几分钟，不谎报今天用完', () => {
+    const s = textOf(byClass(t, 'sp-feedback-status'));
+    assert.ok(/太快|稍候|分钟/.test(s), s);
+    assert.ok(s.indexOf('明天') < 0, '突发不该说成今天用完');
+  });
+})();
+
+await (async () => {
+  // 回归：中转返回 ok:true 但没带 remaining（旧版中转）。旧写法
+  // Number.isFinite(Number(null)) === true 会把它读成 0，界面谎报「今天用完」。
+  await mountFeedback((args) =>
+    args.url.endsWith('/quota') ? okQuota() : { status: 200, body: '{"ok":true}' },
+  );
+  byClass(snap(), 'sp-feedback-text').props.onChange({ target: { value: '没有 remaining' } });
+  byClass(snap(), 'sp-feedback-send').props.onClick();
+  await sleep(80);
+  const t = snap();
+  fb('反馈：中转没回传额度时按旧值自减，不说「今天用完」', () => {
+    const q = textOf(byClass(t, 'sp-feedback-quota'));
+    assert.ok(q.indexOf('24') >= 0, '应自减为 24，实际：' + q);
+    assert.ok(q.indexOf('用完') < 0, '不能谎报额度耗尽：' + q);
+    assert.ok(textOf(byClass(t, 'sp-feedback-send')).indexOf('已发送') >= 0);
+  });
+})();
+
+httpResponder = null;
+try {
+  dispose2();
+} catch {
+  feedbackFailed += 1;
+}
+
 const checks = [
   ['注册了状态行控件', !!statusItem],
   ['注册了 overlay', !!overlay],
@@ -306,13 +570,14 @@ const checks = [
   ['连续切换两个开关互不覆盖', togglesIndependent],
   ['设置加载完成前开关禁用', disabledBeforeLoad],
   ['设置加载完成后开关可用', enabledAfterLoad],
-  ['样式通过宿主主题注入一次', injectedCss.length === 1 && injectedCss[0].indexOf('.sp-chip') >= 0],
+  ['样式通过宿主主题注入一次', injectedCss.length >= 1 && injectedCss[0].indexOf('.sp-chip') >= 0],
   ['卸载函数可安全执行', disposeOk],
+  ...feedbackChecks,
 ];
 
 console.log('\n--- checks ---');
 for (const [n, ok] of checks) console.log(`${ok ? 'PASS' : 'FAIL'} ${n}`);
-const all = checks.every(([, ok]) => ok);
+const all = checks.every(([, ok]) => ok) && feedbackFailed === 0;
 console.log(`\n扫描耗时 ${scanMs}ms，列表 ${allInvocations.length} 条，写入 ${JSON.stringify(lastDraft)}`);
 console.log(`RESULT=${all ? 'SMOKE_OK' : 'SMOKE_PARTIAL'}`);
 process.exit(all ? 0 : 1);

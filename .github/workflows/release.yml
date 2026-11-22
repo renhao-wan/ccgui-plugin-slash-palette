@@ -21,6 +21,18 @@ jobs:
         with:
           node-version: 20
 
+      # 纯函数基准在另一个仓库里；checkout 进来后按路径比对。
+      - name: Checkout feedback base
+        uses: actions/checkout@v4
+        with:
+          repository: renhao-wan/ccgui-plugin-github-trending
+          path: .feedback-base
+
+      - name: Check feedback helpers match the base copy
+        env:
+          FEEDBACK_BASE: ${{ github.workspace }}/.feedback-base/src/lib/feedback.mjs
+        run: node scripts/check-feedback-sync.mjs
+
       - name: Validate manifest
         run: node scripts/validate-manifest.mjs
 

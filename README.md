@@ -65,8 +65,50 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 | `exec:powershell` | 列目录、读 frontmatter |
 | `theme` | 通过宿主主题接口注入插件样式（老宿主回退到组件内联） |
 | `storage` | 缓存命令列表与设置 |
+| `network:ccgui-feedback.2653990378.workers.dev` | 「发送反馈」：把你填的那段文字转发到作者邮箱。不点就不会发 |
 
-`exec:powershell` 只执行插件内置的只读扫描脚本：列目录、读命令文件的 frontmatter，不写入、不联网。
+`exec:powershell` 只执行插件内置的只读扫描脚本：列目录、读命令文件的 frontmatter，不写入。除你主动点「发送反馈」外不发起任何网络请求——扫描本身不联网。
+
+## 反馈
+
+设置页底部有「反馈」一区，两种方式任选：
+
+1. **通过 GitHub 提 Issue** —— 打开已经预填好你那段文字的 Issue 页面，
+   登录状态下只差一次点击。不需要任何网络权限，永远可用。
+2. **发送反馈** —— 经中转直接发到作者邮箱，不用注册、不用跳转。
+
+**发送的内容只有**：你填的那段文字、插件版本、CC GUI 版本、时间戳。
+不含会话内容、代码、文件路径或任何本机信息。请求体字段在单测里钉死了白名单
+（`test/feedback.test.mjs`），多一个字段就测试失败。
+
+额度是**每台机器每天 30 条，四个插件共享同一个池**（另加 10 分钟 3 条的突发保护），
+防止被脚本刷。额度用完时界面会直说，并提示改用 GitHub Issue——不会静默失败。
+
+中转是作者自建的 Cloudflare Worker，凭据只存在它的 secret 里——
+插件里没有任何邮件密钥，因为没有密钥可放。**中转的代码是公开的**，
+上面关于隐私的每一项承诺都可以自己核对：
+[ccgui-feedback-worker](https://github.com/renhao-wan/ccgui-feedback-worker)。
+
+### 发不出去时
+
+`workers.dev` 在国内常被 DNS 污染，邮件中转可能连不上。插件不会卡在那里，
+每种失败都给出下一步：
+
+| 情况 | 你会看到 | 还能做什么 |
+|---|---|---|
+| 网络/DNS 不通 | 连不上反馈服务，请检查网络或代理 | 改用 GitHub Issue |
+| 请求超时 | 发送超时。中转可能被网络挡住 | 改用 GitHub Issue |
+| 返回 200 但不是中转的 JSON | 反馈服务返回了无法识别的内容，可能被网络拦截 | 改用 GitHub Issue |
+| 发得太快（10 分钟内第 4 条） | 发得太快了，稍等几分钟再试 | 稍候，或改用 Issue |
+| 今天 30 条用完 | 今天的反馈额度已用完，明天再来 | 明天，或改用 Issue |
+| 中转内部出错（5xx） | 中转暂时不可用，稍后再试 | 稍后重试，或改用 Issue |
+| 权限没生效（旧版本升级） | 网络权限未生效，请重新安装插件 | 重新「从本地目录安装」 |
+
+第二行这条别忽略：运营商劫持页、校园网登录门户、代理错误页**都会返回 200**。
+只看状态码就会告诉你「已发送」，而你实际什么都没发出去。所以判成功要求
+响应体里带 `ok: true`，不是 2xx 就算。
+
+**GitHub Issue 那条路不依赖中转**，国内网络下基本总能走通，所以它始终在按钮旁边。
 
 ## 安装与迭代
 
@@ -77,6 +119,7 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 ## 本地自检
 
 ```bash
+node scripts/check-feedback-sync.mjs  # 反馈纯函数与基准（github-trending/src/lib/feedback.mjs）逐字一致
 node scripts/validate-manifest.mjs   # manifest、权限、黑名单、产物大小
 node scripts/smoke.mjs               # 真实调用 PowerShell，验证扫描与写入
 ```
@@ -86,8 +129,8 @@ node scripts/smoke.mjs               # 真实调用 PowerShell，验证扫描与
 推送与 `manifest.json` 的 `version` 相同的 tag（无 `v` 前缀也可）触发 GitHub Actions：
 
 ```bash
-git tag 0.1.0
-git push origin 0.1.0
+git tag 0.2.0
+git push origin 0.2.0
 ```
 
 流水线会校验 manifest、比对 tag、生成 `checksums.txt`，并把 `main.js`、`manifest.json`、`checksums.txt` 附到 Release。

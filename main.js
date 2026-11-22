@@ -6,6 +6,11 @@ const PLUGIN_ID = 'slash-palette';
 const CACHE_KEY = 'slash-palette-cache-v1';
 const SETTINGS_KEY = 'slash-palette-settings-v1';
 const CACHE_TTL = 10 * 60 * 1000;
+// 反馈中转。改主机名要同步 manifest.json 的 network:<host>（精确匹配，不支持通配）。
+const FEEDBACK_ENDPOINT = 'https://ccgui-feedback.2653990378.workers.dev';
+const FEEDBACK_REPO = 'renhao-wan/ccgui-plugin-slash-palette';
+const FEEDBACK_PLUGIN_NAME = 'Claude 斜杠命令';
+const FEEDBACK_TIMEOUT_MS = 15000;
 
 const DEFAULT_SETTINGS = {
   plugins: true,
@@ -29,6 +34,257 @@ const GROUP_ORDER = [
   'plugin-skill',
   'builtin',
 ];
+
+/* ------------------------------------------------------------------ 反馈纯函数
+ * 从 ccgui-plugin-github-trending 的 src/lib/feedback.mjs 原样复制（这个插件
+ * 没有构建步骤，只能整段内联）。改这里记得同步那边，两边应当逐字一致。
+ * 只回答「发什么」和「回什么」，网络在下方 sendFeedback / fetchQuota 里。
+ */
+
+/** 正文上限。再长就不是一条反馈，而是一篇文档了。 */
+const TEXT_LIMIT = 1000;
+
+/**
+ * 收敛用户输入：去控制字符、统一换行、折叠连续空行与行尾空白、限长。
+ * 保留大小写、中文、emoji 与**换行**——用户最常贴的就是报错日志，
+ * 压成一行后堆栈就没法看了。
+ */
+function normaliseFeedbackText(raw) {
+  return String(raw === undefined || raw === null ? '' : raw)
+    // 先统一换行，再剥控制字符（保留 \n）。制表符换成空格——堆栈缩进有用。
+    .replace(/\r\n?/g, '\n')
+    .replace(/\t/g, ' ')
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f�]/g, '')
+    // 只去行尾空白与整段的首尾空白。**正文内行首缩进要留着**：
+    // 报错堆栈靠它对齐，去掉后 `at fetch` 就和日志正文混在一起了。
+    .replace(/[ \t]+$/gm, '')
+    .replace(/^[ \t]+/, '')
+    // 三个以上连续换行压成两个（一段空行），既保留分段又不留大片空白。
+    .replace(/\n{3,}/g, '\n\n')
+    // 首尾空行去掉。
+    .replace(/^\n+|\n+$/g, '')
+    .slice(0, TEXT_LIMIT)
+    .replace(/[ \t\n]+$/, '');
+}
+
+/**
+ * GitHub 新建 Issue 的预填链接。
+ *
+ * 用预填而不是直接调 API：API 要 PAT，PAT 写进插件源码等于公开。预填链接
+ * 只依赖用户浏览器里已有的登录态，插件一行网络代码都不用写。
+ */
+function buildIssueUrl(o) {
+  const text = normaliseFeedbackText(o.text);
+  const body = [
+    text || '_（请在这里描述问题或建议）_',
+    '',
+    '---',
+    '插件：' + String(o.pluginName || '') + ' ' + String(o.pluginVersion || ''),
+    'CC GUI：' + String(o.hostVersion || ''),
+  ].join('\n');
+  const q = new URLSearchParams({
+    title: '[反馈] ' + String(o.pluginName || ''),
+    body,
+  });
+  return 'https://github.com/' + String(o.repo || '') + '/issues/new?' + q.toString();
+}
+
+/** 请求体允许的字段。白名单而非黑名单：漏传字段比误传路径好。 */
+const PAYLOAD_FIELDS = ['text', 'pluginId', 'pluginVersion', 'hostVersion', 'ts'];
+
+/** 组装发往中转的请求体，只保留白名单字段。 */
+function buildFeedbackPayload(o) {
+  const src = {
+    text: normaliseFeedbackText(o.text),
+    pluginId: String(o.pluginId || ''),
+    pluginVersion: String(o.pluginVersion || ''),
+    hostVersion: String(o.hostVersion || ''),
+    ts: Number(o.now) || Date.now(),
+  };
+  const out = {};
+  for (const k of PAYLOAD_FIELDS) out[k] = src[k];
+  return out;
+}
+
+function parseJsonBody(body) {
+  if (typeof body !== 'string' || !body) return null;
+  try {
+    const v = JSON.parse(body);
+    return v && typeof v === 'object' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 把服务端给的额度字段收敛成 number | null。
+ *
+ * 别用 Number.isFinite(Number(v))：Number(null) 与 Number('') 都是 0，
+ * 于是「中转没带这个字段」会被读成「今天 0 条额度」，界面就对刚发送成功的
+ * 用户说「今天的额度已用完」。这里只认真正的数字与非空数字字符串。
+ */
+function quotaCount(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string') {
+    if (!v.trim()) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * 发送成功后更新界面上的剩余额度：服务端回传的优先，没给就按旧值自减一条。
+ */
+function nextQuota(prev, fromServer) {
+  const n = quotaCount(fromServer);
+  if (n !== null) {
+    return { remaining: n, dailyLimit: (prev && prev.dailyLimit) || 30 };
+  }
+  const prevRemaining = prev && typeof prev.remaining === 'number' ? prev.remaining : null;
+  if (prevRemaining === null) return prev;
+  return { remaining: Math.max(0, prevRemaining - 1), dailyLimit: prev.dailyLimit || 30 };
+}
+
+/**
+ * 把一次中转响应翻译成界面文案。
+ *
+ * 一条原则：**永远给出「你还能做什么」**。反馈发不出去不是用户的错，
+ * 所以每条失败文案都要么说清原因，要么指向还能走的路（GitHub Issue）。
+ */
+function describeFeedbackResult(r) {
+  if (r && r.error) {
+    const raw = String(r.error.message || r.error);
+    if (/timed?\s*out|timeout|ETIMEDOUT/i.test(raw)) {
+      return {
+        ok: false,
+        kind: 'timeout',
+        message: '发送超时。中转可能被网络挡住，可改用 GitHub Issue 反馈',
+        remaining: null,
+      };
+    }
+    if (/network:|permission|授权/i.test(raw)) {
+      return { ok: false, kind: 'denied', message: '网络权限未生效，请重新安装插件', remaining: null };
+    }
+    // DNS 污染、代理没开、防火墙——国内最常见的三种，用户分不清，
+    // 但「检查网络或代理」这句对他们是有用的动作。
+    return {
+      ok: false,
+      kind: 'network',
+      message: '连不上反馈服务，请检查网络或代理，也可改用 GitHub Issue 反馈',
+      remaining: null,
+    };
+  }
+
+  const status = Number(r && r.status) || 0;
+  const data = parseJsonBody(r && r.body);
+  const remaining = data ? quotaCount(data.remaining) : null;
+  const code = data && typeof data.error === 'string' ? data.error : '';
+
+  if (status >= 200 && status < 300) {
+    // 成功响应必须带 ok:true。只看状态码会把运营商劫持页、登录门户、
+    // 代理错误页（都会返回 200）当成「已发送」——用户以为发出去了，
+    // 实际什么都没有。
+    if (!data || data.ok !== true) {
+      return {
+        ok: false,
+        kind: 'garbled',
+        message: '反馈服务返回了无法识别的内容，可能被网络拦截，可改用 GitHub Issue 反馈',
+        remaining: null,
+      };
+    }
+    return { ok: true, kind: 'sent', message: '反馈已发送，谢谢', remaining };
+  }
+
+  if (status === 429) {
+    // kind 是 Worker 给的：burst = 10 分钟窗口撞了，daily = 今天真没了。
+    // 分不清就按 daily 说——让人等十分钟比让人白等一天更糟。
+    const burst = data && data.kind === 'burst';
+    return {
+      ok: false,
+      kind: 'rate_limited',
+      message: burst
+        ? '发得太快了，稍等几分钟再试，或改用 GitHub Issue 反馈'
+        : '今天的反馈额度已用完，明天再来，或改用 GitHub Issue 反馈',
+      // burst 时今天还有额度，写死 0 会让界面谎报「今天用完了」。
+      remaining: burst ? remaining : 0,
+    };
+  }
+
+  if (status === 413) {
+    return { ok: false, kind: 'invalid', message: '反馈内容太长了，请缩短后重试', remaining };
+  }
+
+  if (status === 400) {
+    // 400 的几种原因要分开说：empty_text 是用户没写，unknown_plugin 是
+    // 版本错位，叫用户去「缩短内容」是把他引到错的方向。
+    if (code === 'unknown_plugin') {
+      return {
+        ok: false,
+        kind: 'invalid',
+        message: '中转不认识这个插件版本，请更新插件，或改用 GitHub Issue 反馈',
+        remaining,
+      };
+    }
+    if (code === 'empty_text') {
+      return { ok: false, kind: 'invalid', message: '反馈内容是空的，写点内容再发', remaining };
+    }
+    return { ok: false, kind: 'invalid', message: '反馈内容不合要求，请缩短后重试', remaining };
+  }
+
+  if (status === 502 || status === 503 || status === 500) {
+    return {
+      ok: false,
+      kind: 'http',
+      // 502 = 发不出邮件、503 = KV 不可用、500 = 中转内部错误。
+      // 三种都是中转那边的事，用户唯一能做的是稍后再试或换 Issue。
+      message: '中转暂时不可用，稍后再试，或改用 GitHub Issue 反馈',
+      remaining,
+    };
+  }
+
+  if (status === 0) {
+    // 请求根本没拿到响应：和网络错误一样处理，别把 "HTTP 0" 甩给用户。
+    return {
+      ok: false,
+      kind: 'network',
+      message: '连不上反馈服务，请检查网络或代理，也可改用 GitHub Issue 反馈',
+      remaining: null,
+    };
+  }
+
+  return {
+    ok: false,
+    kind: 'http',
+    message: '发送失败（HTTP ' + status + '），可改用 GitHub Issue 反馈',
+    remaining,
+  };
+}
+
+/**
+ * 额度提示文案。查不到额度时也要给一句话，不能空着。
+ *
+ * 两种「查不到」要分开：
+ *   - `{offline: true}`：请求失败（网络/代理/中转挂了）。说「额度有限」
+ *     会把网络故障说成用户在刷屏，把他引到错误的方向。
+ *   - 其他：服务端回了但字段脏，或压根没查。这时该提醒别刷屏。
+ */
+function describeQuota(quota) {
+  if (quota && quota.offline) {
+    return { remaining: null, message: '暂时连不上反馈服务，发送时再试', canRetry: true };
+  }
+  // Number(null) === 0、Number("") === 0：不显式挡掉，脏数据会被读成「0 条」，
+  // 界面就说「今天的额度已用完」。先用「是不是数字」把它挡在这一层。
+  const raw = quota ? quota.remaining : undefined;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    return { remaining: null, message: '额度有限，请勿刷屏', canRetry: true };
+  }
+  const remaining = Math.max(0, raw);
+  if (remaining === 0) {
+    return { remaining: 0, message: '今天的反馈额度已用完，明天再来', canRetry: true };
+  }
+  return { remaining, message: '今天还可发 ' + remaining + ' 条反馈', canRetry: false };
+}
 
 // 宿主可能已经自己处理这些命令，默认不显示，避免重复
 const BUILTIN = [
@@ -286,6 +542,44 @@ const UI_CSS = `
 @media (prefers-reduced-motion: reduce) {
   .sp-spinner, .sp-panel, .sp-toast { animation: none; }
 }
+
+/* ---------- 反馈 ---------- */
+.sp-feedback { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.sp-feedback-text {
+  width: 100%; min-height: 84px; box-sizing: border-box; resize: vertical;
+  padding: 8px 10px; border: 1px solid var(--color-separator-border, rgba(127,127,127,.28));
+  border-radius: 6px; background: transparent; color: inherit;
+  font: inherit; font-size: 12px; line-height: 1.6;
+}
+.sp-feedback-text:focus { outline: 2px solid var(--color-accent-primary-default, #3b82f6); outline-offset: -1px; }
+.sp-feedback-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.sp-feedback-count { font-variant-numeric: tabular-nums; }
+.sp-feedback-quota { text-align: right; }
+.sp-link-btn {
+  margin-left: 6px; padding: 0; border: 0; background: none;
+  font: inherit; font-size: 11.5px; color: var(--color-accent-primary-default, #3b82f6);
+  text-decoration: underline; cursor: pointer;
+}
+.sp-link-btn:disabled { opacity: .45; cursor: not-allowed; }
+.sp-link-btn:focus-visible { outline: 2px solid var(--color-accent-primary-default, #3b82f6); outline-offset: 2px; }
+.sp-feedback-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* <a> 当按钮用：补上和 .sp-btn 一样的外观 */
+.sp-feedback-issue {
+  display: inline-flex; align-items: center; height: 26px; box-sizing: border-box;
+  padding: 0 11px; border: 1px solid var(--color-separator-border, rgba(127,127,127,.28));
+  border-radius: 6px; background: transparent; color: inherit;
+  font-size: 12px; line-height: 1; text-decoration: none;
+}
+.sp-feedback-issue:hover { background: var(--color-background-tertiary-hover, rgba(127,127,127,.12)); }
+.sp-btn.sp-btn-primary { border-color: var(--color-accent-primary-default, #3b82f6); }
+.sp-btn:disabled { opacity: .45; cursor: not-allowed; }
+.sp-btn.sp-btn-primary:disabled { opacity: .45; }
+.sp-feedback-status { font-size: 12px; line-height: 1.6; }
+.sp-feedback-status.is-ok { color: var(--color-text-success, #2e7d32); font-weight: 500; }
+.sp-feedback-status.is-bad { color: var(--color-text-danger, #c4242a); }
+/* 成功回执：按钮从「主操作」变成「已完成」。opacity:1 是必须的——
+ * :disabled 的 .45 会把它糊成灰色，等于没改。 */
+.sp-btn.sp-feedback-sent { border-color: var(--color-text-success, #2e7d32); color: var(--color-text-success, #2e7d32); opacity: 1; cursor: default; }
 `;
 
 // PowerShell 用 -EncodedCommand 传入，必须是 UTF-16LE + base64
@@ -514,6 +808,93 @@ export default function activate(ctx) {
     if (!e) return '未知错误';
     if (typeof e === 'string') return e;
     return e.message || String(e);
+  }
+
+  /** 给桥接调用加一层超时。宿主侧若一直挂着，界面不能永远停在「发送中…」。 */
+  function withTimeout(promise, ms, label) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(label + ' timeout')), ms);
+      promise.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  /** 宿主版本。老版本宿主可能没有这一项，取不到就留空，不能因此发不出反馈。 */
+  function hostAppVersion() {
+    try {
+      return ctx && ctx.host && typeof ctx.host.appVersion === 'string' ? ctx.host.appVersion : '';
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 发一条反馈到中转。返回 describeFeedbackResult 的归一化结果。
+   *
+   * 不做连接层重试：反馈是 POST，重试会把同一条内容发两遍——
+   * 用户看到「发送失败」再点一次，比静默重复更可控。
+   */
+  async function sendFeedback(text) {
+    const payload = buildFeedbackPayload({
+      text,
+      pluginId: PLUGIN_ID,
+      pluginVersion: ctx.version,
+      hostVersion: hostAppVersion(),
+    });
+    try {
+      const res = await withTimeout(
+        ctx.bridge.invoke('plugin_http_request', {
+          method: 'POST',
+          url: FEEDBACK_ENDPOINT + '/feedback',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'ccgui-slash-palette/' + ctx.version,
+          },
+          body: JSON.stringify(payload),
+        }),
+        FEEDBACK_TIMEOUT_MS,
+        'feedback',
+      );
+      return describeFeedbackResult({ status: Number(res && res.status) || 0, body: res && res.body });
+    } catch (error) {
+      return describeFeedbackResult({ error });
+    }
+  }
+
+  /**
+   * 查今天的剩余额度。失败时返回 `{offline: true}`——额度查不到不能挡住发反馈，
+   * 但要让界面知道「是连不上」而不是「额度紧张」。
+   */
+  async function fetchQuota() {
+    try {
+      const res = await withTimeout(
+        ctx.bridge.invoke('plugin_http_request', {
+          method: 'GET',
+          url: FEEDBACK_ENDPOINT + '/quota',
+          headers: { 'User-Agent': 'ccgui-slash-palette/' + ctx.version },
+          body: null,
+        }),
+        FEEDBACK_TIMEOUT_MS,
+        'quota',
+      );
+      const status = Number(res && res.status) || 0;
+      if (!(status >= 200 && status < 300)) return { offline: true };
+      const body = res && typeof res.body === 'string' ? res.body : '';
+      const data = body ? JSON.parse(body) : null;
+      // 用 quotaCount 而不是 Number.isFinite(Number(...))：后者把 null/'' 读成 0。
+      const remaining = data ? quotaCount(data.remaining) : null;
+      return remaining === null ? null : { remaining, dailyLimit: Number(data.dailyLimit) || 30 };
+    } catch {
+      return { offline: true };
+    }
   }
 
   // 三个 UI 入口不在同一棵 React 树里，共用一份模块内 store
@@ -966,6 +1347,181 @@ export default function activate(ctx) {
     );
   }
 
+  function FeedbackSection() {
+    // 这个插件的 React 解构里没有 useState/useRef（其余组件只靠 store），
+    // 反馈区是局部状态，直接从 ctx.react 取，别去改顶层的解构。
+    const R = ctx.react;
+    const textState = R.useState('');
+    const text = textState[0];
+    const setText = textState[1];
+    // '' -> 'sending' -> 'sent'/'error'
+    const sendState = R.useState('');
+    const sendStatus = sendState[0];
+    const setSendStatus = sendState[1];
+    const resultState = R.useState(null);
+    const result = resultState[0];
+    const setResult = resultState[1];
+    const quotaState = R.useState(null);
+    const quota = quotaState[0];
+    const setQuota = quotaState[1];
+    const quotaTried = R.useRef(false);
+    // 同步的在途标志。canSend 是渲染时的闭包值，同一 tick 内两次触发都会
+    // 读到旧的 sendStatus=''，只在状态里防不住双击。
+    const sendingRef = R.useRef(false);
+
+    // 只在第一次打开设置页时查额度。查不到就保持 {offline:true}，UI 说明是
+    // 「连不上」而不是「额度紧张」。
+    async function loadQuota() {
+      const q = await fetchQuota();
+      setQuota(q);
+      return q;
+    }
+
+    R.useEffect(() => {
+      if (quotaTried.current) return;
+      quotaTried.current = true;
+      void loadQuota();
+      // 只在挂载时查一次；之后由「重试」按钮或发送结果更新。
+    }, []);
+
+    const trimmed = normaliseFeedbackText(text);
+    const canSend = trimmed.length > 0 && sendStatus !== 'sending';
+
+    const issueUrl = buildIssueUrl({
+      repo: FEEDBACK_REPO,
+      pluginName: FEEDBACK_PLUGIN_NAME,
+      text: trimmed,
+      pluginVersion: ctx.version,
+      hostVersion: hostAppVersion(),
+    });
+
+    async function submit() {
+      // sendingRef 是同步的：同一 tick 内两次触发都会读到 true，挡住双击。
+      if (!canSend || sendingRef.current) return;
+      sendingRef.current = true;
+      const submitted = trimmed;
+      setSendStatus('sending');
+      setResult(null);
+
+      let r;
+      try {
+        r = await sendFeedback(submitted);
+      } finally {
+        sendingRef.current = false;
+      }
+
+      setSendStatus(r.ok ? 'sent' : 'error');
+      setResult(r);
+      if (!r.ok) return;
+
+      // 只清掉「这次发出去的那段」。发送期间用户可能又敲了内容，
+      // 直接清空会把他新写的也抹掉。
+      setText((cur) => (cur === submitted ? '' : cur));
+
+      // 额度优先用服务端回传的真实值。查额度时失败了也不要紧——成功响应里
+      // 带了 remaining，正好顺手把「暂时连不上」纠正过来。
+      // 没有回传额度就按旧值自减一条，别把它读成 0 条。
+      setQuota((prev) => nextQuota(prev, r.remaining));
+    }
+
+    const quotaText = describeQuota(quota);
+    const statusText = sendStatus === 'sending' ? '发送中…' : result ? result.message : '';
+    // 成功时正文被清空，按钮会变成不可点的死按钮。若文案还停在「发送反馈」，
+    // 用户看到的就是「点了没反应」——回执必须落在按钮自己身上。
+    const sendLabel = sendStatus === 'sending' ? '发送中…' : sendStatus === 'sent' ? '已发送' : '发送反馈';
+
+    return h(
+      'div',
+      { className: 'sp-feedback' },
+      h('div', { className: 'sp-setting-title' }, '反馈'),
+      h(
+        'div',
+        { className: 'sp-setting-desc' },
+        '遇到问题或想提建议，两种方式任选其一。发送的内容只有这段文字、插件版本与 CC GUI 版本，不含会话、代码或本机路径。',
+      ),
+      h('textarea', {
+        className: 'sp-feedback-text',
+        value: text,
+        rows: 4,
+        maxLength: TEXT_LIMIT,
+        placeholder: '描述问题或建议…（最多 ' + TEXT_LIMIT + ' 字）',
+        spellCheck: false,
+        'aria-label': '反馈正文',
+        onChange: (e) => {
+          setText(e.target.value);
+          // 重新输入等于开了一条新反馈：上一条的回执都该撤掉。
+          if (sendStatus !== 'sending') {
+            setSendStatus('');
+            setResult(null);
+          }
+        },
+      }),
+      h(
+        'div',
+        { className: 'sp-feedback-row' },
+        h('span', { className: 'sp-setting-desc sp-feedback-count' }, text.length + ' / ' + TEXT_LIMIT),
+        h(
+          'span',
+          { className: 'sp-setting-desc sp-feedback-quota' },
+          quotaText.message,
+          // 额度查不到 / 用完了都给一条重试路径，否则用户只能重开设置页。
+          quotaText.canRetry
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'sp-link-btn sp-feedback-quota-retry',
+                  disabled: sendStatus === 'sending',
+                  onClick: () => void loadQuota(),
+                },
+                '重试',
+              )
+            : null,
+        ),
+      ),
+      h(
+        'div',
+        { className: 'sp-feedback-actions' },
+        h(
+          'a',
+          {
+            className: 'sp-feedback-issue',
+            href: issueUrl,
+            target: '_blank',
+            rel: 'noreferrer noopener',
+            title: '在浏览器里打开预填好的 Issue 页面',
+          },
+          '通过 GitHub 提 Issue',
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            className:
+              'sp-btn sp-btn-primary sp-feedback-send' + (sendStatus === 'sent' ? ' sp-feedback-sent' : ''),
+            disabled: !canSend,
+            onClick: () => void submit(),
+          },
+          sendLabel,
+        ),
+      ),
+      statusText
+        ? h(
+            'div',
+            {
+              className:
+                'sp-feedback-status' +
+                (sendStatus === 'sent' ? ' is-ok' : '') +
+                (sendStatus === 'error' ? ' is-bad' : ''),
+              role: 'status',
+              'aria-live': 'polite',
+            },
+            statusText,
+          )
+        : null,
+    );
+  }
+
   function SettingsSection() {
     const snap = useSnap();
     const s = snap.settings;
@@ -1033,6 +1589,7 @@ export default function activate(ctx) {
           'CLI 目录：' + shortPath(roots.claude) + '\n' +
           '插件缓存：' + shortPath(roots.plugins),
       ),
+      h(FeedbackSection, null),
     );
   }
 
