@@ -9,9 +9,10 @@
     "build": "node scripts/build.mjs",
     "validate": "node scripts/validate-manifest.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "check": "npm run build && npm run validate && npm run smoke"
+    "check": "npm run build && npm run validate && npm run smoke",
+    "shared:check": "shared-version"
   },
   "dependencies": {
-    "ccgui-plugin-shared": "github:renhao-wan/ccgui-plugin-shared#v0.1.0"
+    "ccgui-plugin-shared": "github:renhao-wan/ccgui-plugin-shared#v0.1.1"
   }
 }
