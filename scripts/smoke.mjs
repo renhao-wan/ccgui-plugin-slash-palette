@@ -11,7 +11,7 @@ const MANIFEST = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.m
 
 /* ------------------------------------------------------------ React 替身 */
 
-// 替身本体在 scripts/fake-react.mjs（四插件共用，工作志那份是基准）。
+// 替身本体在 ccgui-plugin-shared/fake-react（四插件共用一份源码）。
 // 这里保留 `renderFresh` 返回 { tree, effects } 的旧形状：本文件十余处
 // 调用点都在用 `.tree`，而 mountFeedback 要手动跑 effect。
 import {
@@ -20,7 +20,7 @@ import {
   textOf,
   byClass,
   findAll,
-} from './fake-react.mjs';
+} from 'ccgui-plugin-shared/fake-react';
 
 // 本文件早年用 `find` 这个名字；保留它，省得改几十处调用点。
 const find = (tree, pred) => findAll(tree, pred)[0] || null;
@@ -144,7 +144,7 @@ const disabledBeforeLoad =
   preLoadBoxes.length > 0 && preLoadBoxes.every((b) => b.props && b.props.disabled === true);
 
 
-// 查询辅助（walk / textOf / byClass / findAll / find）来自 './fake-react.mjs'。
+// 查询辅助（walk / textOf / byClass / findAll / find）来自 ccgui-plugin-shared/fake-react。
 
 // ---- 第一段：启动扫描 ----
 if (!statusItem || !overlay || !settingsSection || !paletteCommand) {

@@ -35,10 +35,13 @@ const GROUP_ORDER = [
   'builtin',
 ];
 
-/* ------------------------------------------------------------------ 反馈纯函数
- * 从 ccgui-plugin-github-trending 的 src/lib/feedback.mjs 原样复制（这个插件
- * 没有构建步骤，只能整段内联）。改这里记得同步那边，两边应当逐字一致。
- * 只回答「发什么」和「回什么」，网络在下方 sendFeedback / fetchQuota 里。
+// ---- 以下由 ccgui-plugin-shared 内联生成 ----
+// ---- ccgui-plugin-shared/feedback.mjs ----
+/**
+ * 反馈渠道的纯函数层：正文归一化、Issue 链接拼装、请求体收敛、响应文案。
+ *
+ * 全部离线可测。网络与 UI 在 main.head.js 里，这一层只回答「发什么」和
+ * 「回什么」，方便把隐私边界钉死在测试里：请求体只允许五个字段。
  */
 
 /** 正文上限。再长就不是一条反馈，而是一篇文档了。 */
@@ -48,23 +51,26 @@ const TEXT_LIMIT = 1000;
  * 收敛用户输入：去控制字符、统一换行、折叠连续空行与行尾空白、限长。
  * 保留大小写、中文、emoji 与**换行**——用户最常贴的就是报错日志，
  * 压成一行后堆栈就没法看了。
+ *
+ * @param {unknown} raw
+ * @returns {string}
  */
 function normaliseFeedbackText(raw) {
-  return String(raw === undefined || raw === null ? '' : raw)
+  return String(raw === undefined || raw === null ? "" : raw)
     // 先统一换行，再剥控制字符（保留 \n）。制表符换成空格——堆栈缩进有用。
-    .replace(/\r\n?/g, '\n')
-    .replace(/\t/g, ' ')
-    .replace(/[\u0000-\u0009\u000b-\u001f\u007f�]/g, '')
+    .replace(/\r\n?/g, "\n")
+    .replace(/\t/g, " ")
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f�]/g, "")
     // 只去行尾空白与整段的首尾空白。**正文内行首缩进要留着**：
-    // 报错堆栈靠它对齐，去掉后 `at fetch` 就和日志正文混在一起了。
-    .replace(/[ \t]+$/gm, '')
-    .replace(/^[ \t]+/, '')
+    // 报错堆栈靠它对齐，去掉后 `at fetchTrending` 就和日志正文混在一起了。
+    .replace(/[ \t]+$/gm, "")
+    .replace(/^[ \t]+/, "")
     // 三个以上连续换行压成两个（一段空行），既保留分段又不留大片空白。
-    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\n{3,}/g, "\n\n")
     // 首尾空行去掉。
-    .replace(/^\n+|\n+$/g, '')
+    .replace(/^\n+|\n+$/g, "")
     .slice(0, TEXT_LIMIT)
-    .replace(/[ \t\n]+$/, '');
+    .replace(/[ \t\n]+$/, "");
 }
 
 /**
@@ -72,33 +78,41 @@ function normaliseFeedbackText(raw) {
  *
  * 用预填而不是直接调 API：API 要 PAT，PAT 写进插件源码等于公开。预填链接
  * 只依赖用户浏览器里已有的登录态，插件一行网络代码都不用写。
+ *
+ * @param {{repo: string, pluginName: string, text: string, pluginVersion: string, hostVersion: string}} o
+ * @returns {string}
  */
 function buildIssueUrl(o) {
   const text = normaliseFeedbackText(o.text);
   const body = [
-    text || '_（请在这里描述问题或建议）_',
-    '',
-    '---',
-    '插件：' + String(o.pluginName || '') + ' ' + String(o.pluginVersion || ''),
-    'CC GUI：' + String(o.hostVersion || ''),
-  ].join('\n');
+    text || "_（请在这里描述问题或建议）_",
+    "",
+    "---",
+    "插件：" + String(o.pluginName || "") + " " + String(o.pluginVersion || ""),
+    "CC GUI：" + String(o.hostVersion || ""),
+  ].join("\n");
   const q = new URLSearchParams({
-    title: '[反馈] ' + String(o.pluginName || ''),
+    title: "[反馈] " + String(o.pluginName || ""),
     body,
   });
-  return 'https://github.com/' + String(o.repo || '') + '/issues/new?' + q.toString();
+  return "https://github.com/" + String(o.repo || "") + "/issues/new?" + q.toString();
 }
 
 /** 请求体允许的字段。白名单而非黑名单：漏传字段比误传路径好。 */
-const PAYLOAD_FIELDS = ['text', 'pluginId', 'pluginVersion', 'hostVersion', 'ts'];
+const PAYLOAD_FIELDS = ["text", "pluginId", "pluginVersion", "hostVersion", "ts"];
 
-/** 组装发往中转的请求体，只保留白名单字段。 */
+/**
+ * 组装发往中转的请求体，只保留白名单字段。
+ *
+ * @param {object} o
+ * @returns {{text: string, pluginId: string, pluginVersion: string, hostVersion: string, ts: number}}
+ */
 function buildFeedbackPayload(o) {
   const src = {
     text: normaliseFeedbackText(o.text),
-    pluginId: String(o.pluginId || ''),
-    pluginVersion: String(o.pluginVersion || ''),
-    hostVersion: String(o.hostVersion || ''),
+    pluginId: String(o.pluginId || ""),
+    pluginVersion: String(o.pluginVersion || ""),
+    hostVersion: String(o.hostVersion || ""),
     ts: Number(o.now) || Date.now(),
   };
   const out = {};
@@ -106,26 +120,29 @@ function buildFeedbackPayload(o) {
   return out;
 }
 
-function parseJsonBody(body) {
-  if (typeof body !== 'string' || !body) return null;
+function parseJson(body) {
+  if (typeof body !== "string" || !body) return null;
   try {
     const v = JSON.parse(body);
-    return v && typeof v === 'object' ? v : null;
+    return v && typeof v === "object" ? v : null;
   } catch {
     return null;
   }
 }
 
 /**
- * 把服务端给的额度字段收敛成 number | null。
+ * 把服务端给的额度字段收敛成 `number | null`。
  *
- * 别用 Number.isFinite(Number(v))：Number(null) 与 Number('') 都是 0，
+ * **别用 `Number.isFinite(Number(v))`**：`Number(null)` 与 `Number("")` 都是 0，
  * 于是「中转没带这个字段」会被读成「今天 0 条额度」，界面就对刚发送成功的
  * 用户说「今天的额度已用完」。这里只认真正的数字与非空数字字符串。
+ *
+ * @param {unknown} v
+ * @returns {number|null}
  */
 function quotaCount(v) {
-  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
-  if (typeof v === 'string') {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string") {
     if (!v.trim()) return null;
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
@@ -134,14 +151,21 @@ function quotaCount(v) {
 }
 
 /**
- * 发送成功后更新界面上的剩余额度：服务端回传的优先，没给就按旧值自减一条。
+ * 发送成功后更新界面上的剩余额度。
+ *
+ * 服务端回传的额度优先（顺手纠正「暂时连不上」）；没给就按本地旧值自减
+ * 一条，旧值也没有就原样保留。纯函数，单测钉住「别把 null 读成 0」。
+ *
+ * @param {{remaining?: number, dailyLimit?: number, offline?: boolean}|null} prev
+ * @param {unknown} fromServer 服务端回传的 remaining
+ * @returns {object|null}
  */
 function nextQuota(prev, fromServer) {
   const n = quotaCount(fromServer);
   if (n !== null) {
     return { remaining: n, dailyLimit: (prev && prev.dailyLimit) || 30 };
   }
-  const prevRemaining = prev && typeof prev.remaining === 'number' ? prev.remaining : null;
+  const prevRemaining = prev && typeof prev.remaining === "number" ? prev.remaining : null;
   if (prevRemaining === null) return prev;
   return { remaining: Math.max(0, prevRemaining - 1), dailyLimit: prev.dailyLimit || 30 };
 }
@@ -151,6 +175,10 @@ function nextQuota(prev, fromServer) {
  *
  * 一条原则：**永远给出「你还能做什么」**。反馈发不出去不是用户的错，
  * 所以每条失败文案都要么说清原因，要么指向还能走的路（GitHub Issue）。
+ * 泛泛一句「发送失败」等于让用户卡死在这里。
+ *
+ * @param {{status?: number, body?: string, error?: Error}} r
+ * @returns {{ok: boolean, kind: string, message: string, remaining: number|null}}
  */
 function describeFeedbackResult(r) {
   if (r && r.error) {
@@ -158,28 +186,28 @@ function describeFeedbackResult(r) {
     if (/timed?\s*out|timeout|ETIMEDOUT/i.test(raw)) {
       return {
         ok: false,
-        kind: 'timeout',
-        message: '发送超时。中转可能被网络挡住，可改用 GitHub Issue 反馈',
+        kind: "timeout",
+        message: "发送超时。中转可能被网络挡住，可改用 GitHub Issue 反馈",
         remaining: null,
       };
     }
     if (/network:|permission|授权/i.test(raw)) {
-      return { ok: false, kind: 'denied', message: '网络权限未生效，请重新安装插件', remaining: null };
+      return { ok: false, kind: "denied", message: "网络权限未生效，请重新安装插件", remaining: null };
     }
-    // DNS 污染、代理没开、防火墙——国内最常见的三种，用户分不清，
+    // DNS 污染、代理没开、防火墙——国内最常见的三种，用户能分不清，
     // 但「检查网络或代理」这句对他们是有用的动作。
     return {
       ok: false,
-      kind: 'network',
-      message: '连不上反馈服务，请检查网络或代理，也可改用 GitHub Issue 反馈',
+      kind: "network",
+      message: "连不上反馈服务，请检查网络或代理，也可改用 GitHub Issue 反馈",
       remaining: null,
     };
   }
 
   const status = Number(r && r.status) || 0;
-  const data = parseJsonBody(r && r.body);
+  const data = parseJson(r && r.body);
   const remaining = data ? quotaCount(data.remaining) : null;
-  const code = data && typeof data.error === 'string' ? data.error : '';
+  const code = data && typeof data.error === "string" ? data.error : "";
 
   if (status >= 200 && status < 300) {
     // 成功响应必须带 ok:true。只看状态码会把运营商劫持页、登录门户、
@@ -188,57 +216,57 @@ function describeFeedbackResult(r) {
     if (!data || data.ok !== true) {
       return {
         ok: false,
-        kind: 'garbled',
-        message: '反馈服务返回了无法识别的内容，可能被网络拦截，可改用 GitHub Issue 反馈',
+        kind: "garbled",
+        message: "反馈服务返回了无法识别的内容，可能被网络拦截，可改用 GitHub Issue 反馈",
         remaining: null,
       };
     }
-    return { ok: true, kind: 'sent', message: '反馈已发送，谢谢', remaining };
+    return { ok: true, kind: "sent", message: "反馈已发送，谢谢", remaining };
   }
 
   if (status === 429) {
     // kind 是 Worker 给的：burst = 10 分钟窗口撞了，daily = 今天真没了。
     // 分不清就按 daily 说——让人等十分钟比让人白等一天更糟。
-    const burst = data && data.kind === 'burst';
+    const burst = data && data.kind === "burst";
     return {
       ok: false,
-      kind: 'rate_limited',
+      kind: "rate_limited",
       message: burst
-        ? '发得太快了，稍等几分钟再试，或改用 GitHub Issue 反馈'
-        : '今天的反馈额度已用完，明天再来，或改用 GitHub Issue 反馈',
+        ? "发得太快了，稍等几分钟再试，或改用 GitHub Issue 反馈"
+        : "今天的反馈额度已用完，明天再来，或改用 GitHub Issue 反馈",
       // burst 时今天还有额度，写死 0 会让界面谎报「今天用完了」。
       remaining: burst ? remaining : 0,
     };
   }
 
   if (status === 413) {
-    return { ok: false, kind: 'invalid', message: '反馈内容太长了，请缩短后重试', remaining };
+    return { ok: false, kind: "invalid", message: "反馈内容太长了，请缩短后重试", remaining };
   }
 
   if (status === 400) {
     // 400 的几种原因要分开说：empty_text 是用户没写，unknown_plugin 是
     // 版本错位，叫用户去「缩短内容」是把他引到错的方向。
-    if (code === 'unknown_plugin') {
+    if (code === "unknown_plugin") {
       return {
         ok: false,
-        kind: 'invalid',
-        message: '中转不认识这个插件版本，请更新插件，或改用 GitHub Issue 反馈',
+        kind: "invalid",
+        message: "中转不认识这个插件版本，请更新插件，或改用 GitHub Issue 反馈",
         remaining,
       };
     }
-    if (code === 'empty_text') {
-      return { ok: false, kind: 'invalid', message: '反馈内容是空的，写点内容再发', remaining };
+    if (code === "empty_text") {
+      return { ok: false, kind: "invalid", message: "反馈内容是空的，写点内容再发", remaining };
     }
-    return { ok: false, kind: 'invalid', message: '反馈内容不合要求，请缩短后重试', remaining };
+    return { ok: false, kind: "invalid", message: "反馈内容不合要求，请缩短后重试", remaining };
   }
 
   if (status === 502 || status === 503 || status === 500) {
     return {
       ok: false,
-      kind: 'http',
+      kind: "http",
       // 502 = 发不出邮件、503 = KV 不可用、500 = 中转内部错误。
       // 三种都是中转那边的事，用户唯一能做的是稍后再试或换 Issue。
-      message: '中转暂时不可用，稍后再试，或改用 GitHub Issue 反馈',
+      message: "中转暂时不可用，稍后再试，或改用 GitHub Issue 反馈",
       remaining,
     };
   }
@@ -247,16 +275,16 @@ function describeFeedbackResult(r) {
     // 请求根本没拿到响应：和网络错误一样处理，别把 "HTTP 0" 甩给用户。
     return {
       ok: false,
-      kind: 'network',
-      message: '连不上反馈服务，请检查网络或代理，也可改用 GitHub Issue 反馈',
+      kind: "network",
+      message: "连不上反馈服务，请检查网络或代理，也可改用 GitHub Issue 反馈",
       remaining: null,
     };
   }
 
   return {
     ok: false,
-    kind: 'http',
-    message: '发送失败（HTTP ' + status + '），可改用 GitHub Issue 反馈',
+    kind: "http",
+    message: "发送失败（HTTP " + status + "），可改用 GitHub Issue 反馈",
     remaining,
   };
 }
@@ -268,22 +296,442 @@ function describeFeedbackResult(r) {
  *   - `{offline: true}`：请求失败（网络/代理/中转挂了）。说「额度有限」
  *     会把网络故障说成用户在刷屏，把他引到错误的方向。
  *   - 其他：服务端回了但字段脏，或压根没查。这时该提醒别刷屏。
+ *
+ * @param {{remaining?: number, dailyLimit?: number, offline?: boolean}|null} quota
+ * @returns {{remaining: number|null, message: string}}
  */
 function describeQuota(quota) {
   if (quota && quota.offline) {
-    return { remaining: null, message: '暂时连不上反馈服务，发送时再试', canRetry: true };
+    return { remaining: null, message: "暂时连不上反馈服务，发送时再试", canRetry: true };
   }
   // Number(null) === 0、Number("") === 0：不显式挡掉，脏数据会被读成「0 条」，
   // 界面就说「今天的额度已用完」。先用「是不是数字」把它挡在这一层。
   const raw = quota ? quota.remaining : undefined;
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
-    return { remaining: null, message: '额度有限，请勿刷屏', canRetry: true };
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return { remaining: null, message: "额度有限，请勿刷屏", canRetry: true };
   }
   const remaining = Math.max(0, raw);
   if (remaining === 0) {
-    return { remaining: 0, message: '今天的反馈额度已用完，明天再来', canRetry: true };
+    return { remaining: 0, message: "今天的反馈额度已用完，明天再来", canRetry: true };
   }
-  return { remaining, message: '今天还可发 ' + remaining + ' 条反馈', canRetry: false };
+  return { remaining, message: "今天还可发 " + remaining + " 条反馈", canRetry: false };
+}
+
+// ---- ccgui-plugin-shared/feedback-net.mjs ----
+/**
+ * 反馈渠道的网络层：`send` 发一条反馈，`quota` 查今天还剩几条。
+ *
+ * 用工厂而不是两个裸函数，是为了让「插件身份」只能从一处来：`pluginId`
+ * 同时决定请求体里的 pluginId 和 User-Agent 前缀，不可能出现「体里是 A、
+ * UA 里是 B」的错位。宿主版本也只在这里读一次。
+ *
+ * 这一层只做「发什么、怎么发、回什么」的搬运；文案全部交给
+ * describeFeedbackResult / describeQuota，隐私边界由 buildFeedbackPayload
+ * 的白名单钉住。
+ */
+
+/**
+ * 给 promise 加超时。超时抛 `Error("<label> timeout")`，
+ * describeFeedbackResult 靠这个字符串识别超时。
+ *
+ * 名字带 `fbNet` 前缀：库文件会和 main.head.js 拼进同一作用域，
+ * 那边已经有一个给工作区登记与解读用的顶层 withTimeout，重名不是覆盖
+ * 而是整个模块语法错误（build.mjs 的顶层重名自检会直接拦住）。
+ *
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {number} ms
+ * @param {string} label
+ * @returns {Promise<T>}
+ */
+function fbNetTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(label + " timeout")), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
+ * 宿主版本。老版本宿主可能没有这一项，取不到就留空——不能因此发不出反馈。
+ *
+ * @param {object} ctx
+ * @returns {string}
+ */
+function fbNetHostVersion(ctx) {
+  try {
+    return ctx && ctx.host && typeof ctx.host.appVersion === "string" ? ctx.host.appVersion : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 建一整套反馈网络调用。
+ *
+ * @param {object} ctx 插件上下文（要用 ctx.bridge / ctx.version / ctx.host）
+ * @param {{endpoint: string, pluginId: string, timeoutMs?: number}} opts
+ *   endpoint 必须与 manifest 的 `network:<host>` 一致，否则宿主会拒。
+ * @returns {{send: (text: string) => Promise<object>, quota: () => Promise<object|null>}}
+ */
+function createFeedbackNet(ctx, opts) {
+  const endpoint = String(opts.endpoint || "").replace(/\/+$/, "");
+  const pluginId = String(opts.pluginId || "");
+  const timeoutMs = Number(opts.timeoutMs) || 15000;
+  const userAgent = () => "ccgui-" + pluginId + "/" + ctx.version;
+
+  /**
+   * 发一条反馈。返回值就是 describeFeedbackResult 的结果，界面直接渲染。
+   *
+   * 不做连接层重试：反馈是 POST，重试会把同一条内容发两遍——用户看到
+   * 「发送失败」再点一次，比静默重复更可控。
+   *
+   * @param {string} text
+   * @returns {Promise<object>}
+   */
+  async function send(text) {
+    const payload = buildFeedbackPayload({
+      text,
+      pluginId,
+      pluginVersion: ctx.version,
+      hostVersion: fbNetHostVersion(ctx),
+    });
+    try {
+      const res = await fbNetTimeout(
+        ctx.bridge.invoke("plugin_http_request", {
+          method: "POST",
+          url: endpoint + "/feedback",
+          headers: { "Content-Type": "application/json", "User-Agent": userAgent() },
+          body: JSON.stringify(payload),
+        }),
+        timeoutMs,
+        "feedback",
+      );
+      return describeFeedbackResult({ status: Number(res && res.status) || 0, body: res && res.body });
+    } catch (error) {
+      return describeFeedbackResult({ error });
+    }
+  }
+
+  /**
+   * 查今天的剩余额度。失败时返回 `{offline: true}`——额度查不到不能挡住
+   * 发反馈，但要让界面知道「是连不上」而不是「额度紧张」，两句话说给用户
+   * 听的意思完全不同。
+   *
+   * @returns {Promise<{remaining: number, dailyLimit: number}|{offline: true}|null>}
+   */
+  async function quota() {
+    try {
+      const res = await fbNetTimeout(
+        ctx.bridge.invoke("plugin_http_request", {
+          method: "GET",
+          url: endpoint + "/quota",
+          headers: { "User-Agent": userAgent() },
+          body: null,
+        }),
+        timeoutMs,
+        "quota",
+      );
+      const status = Number(res && res.status) || 0;
+      if (!(status >= 200 && status < 300)) return { offline: true };
+      const body = res && typeof res.body === "string" ? res.body : "";
+      // 劫持页、登录门户都返回 200 + HTML：JSON.parse 会抛，被外层 catch 接住，
+      // 与「请求失败」同样按连不上处理——不需要单独再判一次。
+      const data = body ? JSON.parse(body) : null;
+      // 用 quotaCount 而不是 Number.isFinite(Number(...))：后者把 null/"" 读成 0，
+      // 界面会说「今天的额度已用完」。
+      const remaining = data ? quotaCount(data.remaining) : null;
+      return remaining === null ? null : { remaining, dailyLimit: Number(data.dailyLimit) || 30 };
+    } catch {
+      return { offline: true };
+    }
+  }
+
+  return { send, quota };
+}
+
+// ---- ccgui-plugin-shared/feedback-ui.mjs ----
+/**
+ * 反馈区的行为层：状态、提交、额度、Issue 链接全在这里，四个插件共用。
+ *
+ * 为什么分成「行为 + 渲染」两步而不是一个组件：
+ * - 每日热点 / 工作志 / 斜杠面板有 CSS 文件，类名各有前缀（gt- / wl- / sp-）；
+ * - CLI 安装检测整套 UI 用内联 style，根本没有 CSS 文件。
+ *
+ * 所以这里只输出「长得一样」的元素树，类名与样式类由调用方传进来；
+ * 内联 style 的那个插件可以只用 useFeedbackForm、自己写渲染。
+ *
+ * 逻辑部分原本在四个插件里各抄一份，而重复的恰好是最容易写错的那几段：
+ * sendingRef 挡双击、成功后只清「这次发出去的那段」、额度不能被 null 读成 0。
+ * 这些行为现在由 test/feedback-ui.test.mjs 逐个钉住。
+ *
+ * 依赖 feedback.mjs 的纯函数。内联进 main.js 后两者在同一作用域；
+ * 单测里通过这条 import 直接解析。build.mjs 会剥掉这行 import。
+ */
+
+
+/**
+ * 反馈区的状态与动作。
+ *
+ * @param {{useState: Function, useRef: Function, useEffect: Function}} R React 子系统
+ *   （插件里是 ctx.react，测试里是假 React 的 api）。
+ * @param {object} opts
+ * @param {string} opts.repo           Issue 落到哪个仓库（owner/name）。
+ * @param {string} opts.pluginName     Issue 标题里的插件中文名。
+ * @param {string} opts.pluginVersion  写进请求体与 Issue 的插件版本。
+ * @param {string} [opts.hostVersion]  CC GUI 版本，取不到就留空。
+ * @param {(text: string) => Promise<object>} opts.send
+ * @param {() => Promise<object|null>} opts.quota
+ * @returns {object} 状态 + 动作 + `render(h, styleOpts)`
+ */
+function useFeedbackForm(R, opts) {
+  const textState = R.useState("");
+  const text = textState[0];
+  const setText = textState[1];
+  // "" -> "sending" -> "sent"/"error"
+  const sendState = R.useState("");
+  const sendStatus = sendState[0];
+  const setSendStatus = sendState[1];
+  const resultState = R.useState(null);
+  const result = resultState[0];
+  const setResult = resultState[1];
+  const quotaState = R.useState(null);
+  const quota = quotaState[0];
+  const setQuota = quotaState[1];
+  // 「只在挂载时查一次额度」的标志。用 ref 而不是 state：它只在 effect
+  // 里读写，不该触发重渲染。
+  const quotaTried = R.useRef(false);
+  // 同步的在途标志。canSend 是渲染时的闭包值，同一 tick 内两次触发都会
+  // 读到旧的 sendStatus=""，只在状态里防不住双击。
+  const sendingRef = R.useRef(false);
+
+  // 查不到就保持 {canRetry:true}，UI 说明是「连不上」而不是「额度紧张」
+  // ——两句话对用户的意思完全不同。
+  async function loadQuota() {
+    const q = await opts.quota();
+    setQuota(q);
+    return q;
+  }
+
+  R.useEffect(() => {
+    if (quotaTried.current) return;
+    quotaTried.current = true;
+    void loadQuota();
+    // 只在挂载时查一次；之后由「重试」按钮或发送结果更新。
+  }, []);
+
+  const trimmed = normaliseFeedbackText(text);
+  const canSend = trimmed.length > 0 && sendStatus !== "sending";
+
+  const issueUrl = buildIssueUrl({
+    repo: opts.repo,
+    pluginName: opts.pluginName,
+    text: trimmed,
+    pluginVersion: opts.pluginVersion,
+    hostVersion: opts.hostVersion || "",
+  });
+
+  async function submit() {
+    // sendingRef 是同步的：同一 tick 内两次触发都会读到 true，挡住双击。
+    // sendStatus 要等重渲染才更新，靠它挡不住。
+    if (!canSend || sendingRef.current) return;
+    sendingRef.current = true;
+    const submitted = trimmed;
+    setSendStatus("sending");
+    setResult(null);
+
+    let r;
+    try {
+      r = await opts.send(submitted);
+    } finally {
+      sendingRef.current = false;
+    }
+
+    setSendStatus(r.ok ? "sent" : "error");
+    setResult(r);
+    // 失败时正文原样留着：用户重打一遍比什么都糟。
+    if (!r.ok) return;
+
+    // 只清掉「这次发出去的那段」。发送期间用户可能又敲了内容（那几个请求
+    // 往返里 textarea 没禁用），直接清空会把他新写的也抹掉。
+    setText((cur) => (cur === submitted ? "" : cur));
+
+    // 额度优先用服务端回传的真实值。查额度时失败了也不要紧——成功响应里
+    // 带了 remaining，正好顺手把「暂时连不上」纠正过来。没有回传就自减一格。
+    setQuota((prev) => nextQuota(prev, r.remaining));
+  }
+
+  /** 正文变化。重新输入等于开了一条新反馈，上一条的回执（成功或失败）都该撤掉。 */
+  function changeText(value) {
+    setText(value);
+    if (sendStatus !== "sending") {
+      setSendStatus("");
+      setResult(null);
+    }
+  }
+
+  const quotaText = describeQuota(quota);
+  const statusText =
+    sendStatus === "sending" ? "发送中…" : result ? result.message : "";
+  // 成功时正文被清空，按钮会变成不可点的死按钮。若文案还停在「发送反馈」，
+  // 用户看到的就是「点了没反应」——回执必须落在按钮自己身上。
+  const sendLabel =
+    sendStatus === "sending" ? "发送中…" : sendStatus === "sent" ? "已发送" : "发送反馈";
+
+  /**
+   * 渲染成元素树。
+   *
+   * @param {Function} h createElement
+   * @param {object} [style]
+   * @param {string} [style.prefix]      类名前缀，如 "gt"；产出 `${prefix}-feedback-*`
+   * @param {number} [style.rows]        正文框行数
+   * @param {string} [style.variant]     "section"（带 section 外壳）或 "bare"
+   * @param {object} [style.classes]     各插件的样式类：input / primaryBtn /
+   *   secondaryBtn / hint / note / linkBtn。缺省为空。
+   */
+  function render(h, style) {
+    const s = style || {};
+    const prefix = s.prefix || "fb";
+    const rows = s.rows || 5;
+    const c = s.classes || {};
+    // 统一样式钩子（行为稳定、可被任何插件套）与各插件自己的样式类
+    // （决定长什么样）拼在一起。两者都要，缺了哪一半都不行。
+    const cls = (name, extra) => {
+      const own = prefix + "-feedback-" + name;
+      return extra ? own + " " + extra : own;
+    };
+    const join = (a, b) => (a && b ? a + " " + b : a || b || "");
+
+    const head =
+      s.variant === "section"
+        ? h(
+            "div",
+            { className: prefix + "-section-label" },
+            h("h2", null, "反馈"),
+            h("p", null, "遇到问题或想提建议，两种方式任选其一。"),
+          )
+        : null;
+
+    const body = [
+      h("textarea", {
+        className: cls("text", c.input),
+        value: text,
+        rows: rows,
+        maxLength: TEXT_LIMIT,
+        placeholder: "描述问题或建议…（最多 " + TEXT_LIMIT + " 字）",
+        spellCheck: false,
+        "aria-label": "反馈正文",
+        onChange: (e) => changeText(e.target.value),
+      }),
+      h(
+        "div",
+        { className: cls("row") },
+        h("span", { className: cls("count", c.hint) }, text.length + " / " + TEXT_LIMIT),
+        h(
+          "span",
+          { className: cls("quota", c.hint) },
+          quotaText.message,
+          // 额度查不到 / 用完了都给一条重试路径，否则用户只能重开设置页。
+          quotaText.canRetry
+            ? h(
+                "button",
+                {
+                  type: "button",
+                  className: cls("quota-retry", c.linkBtn),
+                  disabled: sendStatus === "sending",
+                  onClick: () => void loadQuota(),
+                },
+                "重试",
+              )
+            : null,
+        ),
+      ),
+      h(
+        "div",
+        { className: cls("actions") },
+        h(
+          "a",
+          {
+            className: join(
+              cls("issue", c.secondaryBtn),
+              // 正文为空时 Issue 链接仍可点，但看起来不该和「能发」时一样重。
+              // 判断口径必须与 canSend 一致，所以这里用同一个 trimmed，
+              // 不能让调用方自己再算一遍（那样两边迟早漂开）。
+              trimmed ? "" : c.muted || "",
+            ),
+            href: issueUrl,
+            target: "_blank",
+            rel: "noreferrer noopener",
+            title: "在浏览器里打开预填好的 Issue 页面",
+          },
+          "通过 GitHub 提 Issue",
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            className: cls("send", c.primaryBtn) + (sendStatus === "sent" ? " " + cls("sent") : ""),
+            disabled: !canSend,
+            onClick: () => void submit(),
+          },
+          sendLabel,
+        ),
+      ),
+      statusText
+        ? h(
+            "p",
+            {
+              className:
+                cls("status", c.note) +
+                (sendStatus === "sent" ? " is-ok" : "") +
+                (sendStatus === "error" ? " is-bad" : ""),
+              role: "status",
+              "aria-live": "polite",
+            },
+            statusText,
+          )
+        : null,
+      h(
+        "p",
+        { className: c.hint || "" },
+        "发送的内容只有这段文字、插件版本与 CC GUI 版本。不含会话、代码或本机路径。",
+      ),
+    ].filter(Boolean);
+
+    if (s.variant === "section") {
+      return h(
+        "section",
+        { className: prefix + "-section" },
+        head,
+        h("div", { className: prefix + "-section-panel" }, body),
+      );
+    }
+    return h("div", { className: prefix + "-feedback" }, body);
+  }
+
+  return {
+    text,
+    setText: changeText,
+    sendStatus,
+    result,
+    quota,
+    quotaText,
+    canSend,
+    submit,
+    retryQuota: loadQuota,
+    issueUrl,
+    statusText,
+    sendLabel,
+    render,
+  };
 }
 
 // 宿主可能已经自己处理这些命令，默认不显示，避免重复
@@ -808,422 +1256,6 @@ export default function activate(ctx) {
     if (!e) return '未知错误';
     if (typeof e === 'string') return e;
     return e.message || String(e);
-  }
-
-  /**
-   * 反馈渠道的网络层：`send` 发一条反馈，`quota` 查今天还剩几条。
-   *
-   * 用工厂而不是两个裸函数，是为了让「插件身份」只能从一处来：`pluginId`
-   * 同时决定请求体里的 pluginId 和 User-Agent 前缀，不可能出现「体里是 A、
-   * UA 里是 B」的错位。宿主版本也只在这里读一次。
-   *
-   * 这一层只做「发什么、怎么发、回什么」的搬运；文案全部交给
-   * describeFeedbackResult / describeQuota，隐私边界由 buildFeedbackPayload
-   * 的白名单钉住。
-   */
-
-  /**
-   * 给 promise 加超时。超时抛 `Error("<label> timeout")`，
-   * describeFeedbackResult 靠这个字符串识别超时。
-   *
-   * 名字带 `fbNet` 前缀：库文件会和 main.head.js 拼进同一作用域，
-   * 那边已经有一个给工作区登记与解读用的顶层 withTimeout，重名不是覆盖
-   * 而是整个模块语法错误（build.mjs 的顶层重名自检会直接拦住）。
-   *
-   * @template T
-   * @param {Promise<T>} promise
-   * @param {number} ms
-   * @param {string} label
-   * @returns {Promise<T>}
-   */
-  function fbNetTimeout(promise, ms, label) {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(label + " timeout")), ms);
-      promise.then(
-        (value) => {
-          clearTimeout(timer);
-          resolve(value);
-        },
-        (error) => {
-          clearTimeout(timer);
-          reject(error);
-        },
-      );
-    });
-  }
-
-  /**
-   * 宿主版本。老版本宿主可能没有这一项，取不到就留空——不能因此发不出反馈。
-   *
-   * @param {object} ctx
-   * @returns {string}
-   */
-  function fbNetHostVersion(ctx) {
-    try {
-      return ctx && ctx.host && typeof ctx.host.appVersion === "string" ? ctx.host.appVersion : "";
-    } catch {
-      return "";
-    }
-  }
-
-  /**
-   * 建一整套反馈网络调用。
-   *
-   * @param {object} ctx 插件上下文（要用 ctx.bridge / ctx.version / ctx.host）
-   * @param {{endpoint: string, pluginId: string, timeoutMs?: number}} opts
-   *   endpoint 必须与 manifest 的 `network:<host>` 一致，否则宿主会拒。
-   * @returns {{send: (text: string) => Promise<object>, quota: () => Promise<object|null>}}
-   */
-  function createFeedbackNet(ctx, opts) {
-    const endpoint = String(opts.endpoint || "").replace(/\/+$/, "");
-    const pluginId = String(opts.pluginId || "");
-    const timeoutMs = Number(opts.timeoutMs) || 15000;
-    const userAgent = () => "ccgui-" + pluginId + "/" + ctx.version;
-
-    /**
-     * 发一条反馈。返回值就是 describeFeedbackResult 的结果，界面直接渲染。
-     *
-     * 不做连接层重试：反馈是 POST，重试会把同一条内容发两遍——用户看到
-     * 「发送失败」再点一次，比静默重复更可控。
-     *
-     * @param {string} text
-     * @returns {Promise<object>}
-     */
-    async function send(text) {
-      const payload = buildFeedbackPayload({
-        text,
-        pluginId,
-        pluginVersion: ctx.version,
-        hostVersion: fbNetHostVersion(ctx),
-      });
-      try {
-        const res = await fbNetTimeout(
-          ctx.bridge.invoke("plugin_http_request", {
-            method: "POST",
-            url: endpoint + "/feedback",
-            headers: { "Content-Type": "application/json", "User-Agent": userAgent() },
-            body: JSON.stringify(payload),
-          }),
-          timeoutMs,
-          "feedback",
-        );
-        return describeFeedbackResult({ status: Number(res && res.status) || 0, body: res && res.body });
-      } catch (error) {
-        return describeFeedbackResult({ error });
-      }
-    }
-
-    /**
-     * 查今天的剩余额度。失败时返回 `{offline: true}`——额度查不到不能挡住
-     * 发反馈，但要让界面知道「是连不上」而不是「额度紧张」，两句话说给用户
-     * 听的意思完全不同。
-     *
-     * @returns {Promise<{remaining: number, dailyLimit: number}|{offline: true}|null>}
-     */
-    async function quota() {
-      try {
-        const res = await fbNetTimeout(
-          ctx.bridge.invoke("plugin_http_request", {
-            method: "GET",
-            url: endpoint + "/quota",
-            headers: { "User-Agent": userAgent() },
-            body: null,
-          }),
-          timeoutMs,
-          "quota",
-        );
-        const status = Number(res && res.status) || 0;
-        if (!(status >= 200 && status < 300)) return { offline: true };
-        const body = res && typeof res.body === "string" ? res.body : "";
-        // 劫持页、登录门户都返回 200 + HTML：JSON.parse 会抛，被外层 catch 接住，
-        // 与「请求失败」同样按连不上处理——不需要单独再判一次。
-        const data = body ? JSON.parse(body) : null;
-        // 用 quotaCount 而不是 Number.isFinite(Number(...))：后者把 null/"" 读成 0，
-        // 界面会说「今天的额度已用完」。
-        const remaining = data ? quotaCount(data.remaining) : null;
-        return remaining === null ? null : { remaining, dailyLimit: Number(data.dailyLimit) || 30 };
-      } catch {
-        return { offline: true };
-      }
-    }
-
-    return { send, quota };
-  }
-
-  /* ---- 反馈区行为层：与 ccgui-plugin-github-trending/src/lib/feedback-ui.mjs 逐字相同 ---- */
-  /**
-   * 反馈区的行为层：状态、提交、额度、Issue 链接全在这里，四个插件共用。
-   *
-   * 为什么分成「行为 + 渲染」两步而不是一个组件：
-   * - 每日热点 / 工作志 / 斜杠面板有 CSS 文件，类名各有前缀（gt- / wl- / sp-）；
-   * - CLI 安装检测整套 UI 用内联 style，根本没有 CSS 文件。
-   *
-   * 所以这里只输出「长得一样」的元素树，类名与样式类由调用方传进来；
-   * 内联 style 的那个插件可以只用 useFeedbackForm、自己写渲染。
-   *
-   * 逻辑部分原本在四个插件里各抄一份，而重复的恰好是最容易写错的那几段：
-   * sendingRef 挡双击、成功后只清「这次发出去的那段」、额度不能被 null 读成 0。
-   * 这些行为现在由 test/feedback-ui.test.mjs 逐个钉住。
-   *
-   * 依赖 feedback.mjs 的纯函数。内联进 main.js 后两者在同一作用域；
-   * 单测里通过这条 import 直接解析。build.mjs 会剥掉这行 import。
-   */
-
-
-  /**
-   * 反馈区的状态与动作。
-   *
-   * @param {{useState: Function, useRef: Function, useEffect: Function}} R React 子系统
-   *   （插件里是 ctx.react，测试里是假 React 的 api）。
-   * @param {object} opts
-   * @param {string} opts.repo           Issue 落到哪个仓库（owner/name）。
-   * @param {string} opts.pluginName     Issue 标题里的插件中文名。
-   * @param {string} opts.pluginVersion  写进请求体与 Issue 的插件版本。
-   * @param {string} [opts.hostVersion]  CC GUI 版本，取不到就留空。
-   * @param {(text: string) => Promise<object>} opts.send
-   * @param {() => Promise<object|null>} opts.quota
-   * @returns {object} 状态 + 动作 + `render(h, styleOpts)`
-   */
-  function useFeedbackForm(R, opts) {
-    const textState = R.useState("");
-    const text = textState[0];
-    const setText = textState[1];
-    // "" -> "sending" -> "sent"/"error"
-    const sendState = R.useState("");
-    const sendStatus = sendState[0];
-    const setSendStatus = sendState[1];
-    const resultState = R.useState(null);
-    const result = resultState[0];
-    const setResult = resultState[1];
-    const quotaState = R.useState(null);
-    const quota = quotaState[0];
-    const setQuota = quotaState[1];
-    // 「只在挂载时查一次额度」的标志。用 ref 而不是 state：它只在 effect
-    // 里读写，不该触发重渲染。
-    const quotaTried = R.useRef(false);
-    // 同步的在途标志。canSend 是渲染时的闭包值，同一 tick 内两次触发都会
-    // 读到旧的 sendStatus=""，只在状态里防不住双击。
-    const sendingRef = R.useRef(false);
-
-    // 查不到就保持 {canRetry:true}，UI 说明是「连不上」而不是「额度紧张」
-    // ——两句话对用户的意思完全不同。
-    async function loadQuota() {
-      const q = await opts.quota();
-      setQuota(q);
-      return q;
-    }
-
-    R.useEffect(() => {
-      if (quotaTried.current) return;
-      quotaTried.current = true;
-      void loadQuota();
-      // 只在挂载时查一次；之后由「重试」按钮或发送结果更新。
-    }, []);
-
-    const trimmed = normaliseFeedbackText(text);
-    const canSend = trimmed.length > 0 && sendStatus !== "sending";
-
-    const issueUrl = buildIssueUrl({
-      repo: opts.repo,
-      pluginName: opts.pluginName,
-      text: trimmed,
-      pluginVersion: opts.pluginVersion,
-      hostVersion: opts.hostVersion || "",
-    });
-
-    async function submit() {
-      // sendingRef 是同步的：同一 tick 内两次触发都会读到 true，挡住双击。
-      // sendStatus 要等重渲染才更新，靠它挡不住。
-      if (!canSend || sendingRef.current) return;
-      sendingRef.current = true;
-      const submitted = trimmed;
-      setSendStatus("sending");
-      setResult(null);
-
-      let r;
-      try {
-        r = await opts.send(submitted);
-      } finally {
-        sendingRef.current = false;
-      }
-
-      setSendStatus(r.ok ? "sent" : "error");
-      setResult(r);
-      // 失败时正文原样留着：用户重打一遍比什么都糟。
-      if (!r.ok) return;
-
-      // 只清掉「这次发出去的那段」。发送期间用户可能又敲了内容（那几个请求
-      // 往返里 textarea 没禁用），直接清空会把他新写的也抹掉。
-      setText((cur) => (cur === submitted ? "" : cur));
-
-      // 额度优先用服务端回传的真实值。查额度时失败了也不要紧——成功响应里
-      // 带了 remaining，正好顺手把「暂时连不上」纠正过来。没有回传就自减一格。
-      setQuota((prev) => nextQuota(prev, r.remaining));
-    }
-
-    /** 正文变化。重新输入等于开了一条新反馈，上一条的回执（成功或失败）都该撤掉。 */
-    function changeText(value) {
-      setText(value);
-      if (sendStatus !== "sending") {
-        setSendStatus("");
-        setResult(null);
-      }
-    }
-
-    const quotaText = describeQuota(quota);
-    const statusText =
-      sendStatus === "sending" ? "发送中…" : result ? result.message : "";
-    // 成功时正文被清空，按钮会变成不可点的死按钮。若文案还停在「发送反馈」，
-    // 用户看到的就是「点了没反应」——回执必须落在按钮自己身上。
-    const sendLabel =
-      sendStatus === "sending" ? "发送中…" : sendStatus === "sent" ? "已发送" : "发送反馈";
-
-    /**
-     * 渲染成元素树。
-     *
-     * @param {Function} h createElement
-     * @param {object} [style]
-     * @param {string} [style.prefix]      类名前缀，如 "gt"；产出 `${prefix}-feedback-*`
-     * @param {number} [style.rows]        正文框行数
-     * @param {string} [style.variant]     "section"（带 section 外壳）或 "bare"
-     * @param {object} [style.classes]     各插件的样式类：input / primaryBtn /
-     *   secondaryBtn / hint / note / linkBtn。缺省为空。
-     */
-    function render(h, style) {
-      const s = style || {};
-      const prefix = s.prefix || "fb";
-      const rows = s.rows || 5;
-      const c = s.classes || {};
-      // 统一样式钩子（行为稳定、可被任何插件套）与各插件自己的样式类
-      // （决定长什么样）拼在一起。两者都要，缺了哪一半都不行。
-      const cls = (name, extra) => {
-        const own = prefix + "-feedback-" + name;
-        return extra ? own + " " + extra : own;
-      };
-      const join = (a, b) => (a && b ? a + " " + b : a || b || "");
-
-      const head =
-        s.variant === "section"
-          ? h(
-              "div",
-              { className: prefix + "-section-label" },
-              h("h2", null, "反馈"),
-              h("p", null, "遇到问题或想提建议，两种方式任选其一。"),
-            )
-          : null;
-
-      const body = [
-        h("textarea", {
-          className: cls("text", c.input),
-          value: text,
-          rows: rows,
-          maxLength: TEXT_LIMIT,
-          placeholder: "描述问题或建议…（最多 " + TEXT_LIMIT + " 字）",
-          spellCheck: false,
-          "aria-label": "反馈正文",
-          onChange: (e) => changeText(e.target.value),
-        }),
-        h(
-          "div",
-          { className: cls("row") },
-          h("span", { className: cls("count", c.hint) }, text.length + " / " + TEXT_LIMIT),
-          h(
-            "span",
-            { className: cls("quota", c.hint) },
-            quotaText.message,
-            // 额度查不到 / 用完了都给一条重试路径，否则用户只能重开设置页。
-            quotaText.canRetry
-              ? h(
-                  "button",
-                  {
-                    type: "button",
-                    className: cls("quota-retry", c.linkBtn),
-                    disabled: sendStatus === "sending",
-                    onClick: () => void loadQuota(),
-                  },
-                  "重试",
-                )
-              : null,
-          ),
-        ),
-        h(
-          "div",
-          { className: cls("actions") },
-          h(
-            "a",
-            {
-              className: join(
-                cls("issue", c.secondaryBtn),
-                // 正文为空时 Issue 链接仍可点，但看起来不该和「能发」时一样重。
-                // 判断口径必须与 canSend 一致，所以这里用同一个 trimmed，
-                // 不能让调用方自己再算一遍（那样两边迟早漂开）。
-                trimmed ? "" : c.muted || "",
-              ),
-              href: issueUrl,
-              target: "_blank",
-              rel: "noreferrer noopener",
-              title: "在浏览器里打开预填好的 Issue 页面",
-            },
-            "通过 GitHub 提 Issue",
-          ),
-          h(
-            "button",
-            {
-              type: "button",
-              className: cls("send", c.primaryBtn) + (sendStatus === "sent" ? " " + cls("sent") : ""),
-              disabled: !canSend,
-              onClick: () => void submit(),
-            },
-            sendLabel,
-          ),
-        ),
-        statusText
-          ? h(
-              "p",
-              {
-                className:
-                  cls("status", c.note) +
-                  (sendStatus === "sent" ? " is-ok" : "") +
-                  (sendStatus === "error" ? " is-bad" : ""),
-                role: "status",
-                "aria-live": "polite",
-              },
-              statusText,
-            )
-          : null,
-        h(
-          "p",
-          { className: c.hint || "" },
-          "发送的内容只有这段文字、插件版本与 CC GUI 版本。不含会话、代码或本机路径。",
-        ),
-      ].filter(Boolean);
-
-      if (s.variant === "section") {
-        return h(
-          "section",
-          { className: prefix + "-section" },
-          head,
-          h("div", { className: prefix + "-section-panel" }, body),
-        );
-      }
-      return h("div", { className: prefix + "-feedback" }, body);
-    }
-
-    return {
-      text,
-      setText: changeText,
-      sendStatus,
-      result,
-      quota,
-      quotaText,
-      canSend,
-      submit,
-      retryQuota: loadQuota,
-      issueUrl,
-      statusText,
-      sendLabel,
-      render,
-    };
   }
 
   /** 宿主版本。老版本宿主可能没有这一项，取不到就留空，不能因此发不出反馈。 */
@@ -1842,3 +1874,5 @@ export default function activate(ctx) {
     }
   };
 }
+
+
