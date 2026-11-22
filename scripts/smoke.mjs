@@ -9,64 +9,46 @@ import assert from 'node:assert/strict';
 const PLUGIN = new URL('../main.js', import.meta.url).href;
 const MANIFEST = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
 
-const states = new Map();
-let stateIdx = 0;
-let refIdx = 0;
-// 用 let：renderFresh 必须整体换新数组，否则字符串键的 ref 会跨挂载残留。
-let refs = [];
-let effects = [];
-// hook 槽位按「组件实例」分域：嵌套函数组件（如反馈区）不能和父组件共用序号，
-// 否则父组件多一个 useState 就把子组件的槽位整体挤歪。
-let domain = 'root';
-let domainSeq = new Map();
+/* ------------------------------------------------------------ React 替身 */
 
-const fakeReact = {
-  createElement: (type, props, ...children) => ({ type, props, children }),
-  useState: (init) => {
-    const i = domain + '|' + stateIdx++;
-    if (!states.has(i)) states.set(i, typeof init === 'function' ? init() : init);
-    return [
-      states.get(i),
-      (v) => {
-        states.set(i, typeof v === 'function' ? v(states.get(i)) : v);
-      },
-    ];
-  },
-  useEffect: (fn) => {
-    effects.push(fn);
-  },
-  useRef: (init) => {
-    const i = domain + '|' + refIdx++;
-    if (!refs[i]) refs[i] = { current: init === undefined ? null : init };
-    return refs[i];
-  },
-  useCallback: (fn) => fn,
-  useMemo: (fn) => fn(),
-  // 组件订阅 store 时直接取当前快照；不模拟 store 变更后的重渲染
-  useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),
+// 替身本体在 scripts/fake-react.mjs（四插件共用，工作志那份是基准）。
+// 这里保留 `renderFresh` 返回 { tree, effects } 的旧形状：本文件十余处
+// 调用点都在用 `.tree`，而 mountFeedback 要手动跑 effect。
+import {
+  createFakeReact,
+  walk,
+  textOf,
+  byClass,
+  findAll,
+} from './fake-react.mjs';
+
+// 本文件早年用 `find` 这个名字；保留它，省得改几十处调用点。
+const find = (tree, pred) => findAll(tree, pred)[0] || null;
+
+const fake = createFakeReact({ componentName: 'anon' });
+const fakeReact = fake.api;
+
+// slash 的组件只依赖 useState/useRef/useSyncExternalStore，effect 由用例自己跑。
+// 用一层包装把「这一轮渲染里注册的 effect」收集出来，保持 renderFresh 的返回值不变。
+let collectedEffects = [];
+const baseUseEffect = fakeReact.useEffect;
+fakeReact.useEffect = (fn, deps) => {
+  collectedEffects.push({ fn, deps });
+  baseUseEffect(fn, deps);
 };
 
-// React 会调用函数组件；替身也要展开，否则拿到的只是 { type: Comp } 外壳。
-function expand(node) {
-  if (Array.isArray(node)) return node.map(expand);
-  if (!node || typeof node !== 'object') return node;
-  if (typeof node.type === 'function') {
-    const nm = node.type.name || 'anon';
-    const inst = domainSeq.get(nm) || 0;
-    domainSeq.set(nm, inst + 1);
-    const prev = { domain, stateIdx, refIdx };
-    domain = nm + '#' + inst;
-    stateIdx = 0;
-    refIdx = 0;
-    const props = Object.assign({}, node.props || {}, { children: node.children || [] });
-    const out = node.type(props);
-    domain = prev.domain;
-    stateIdx = prev.stateIdx;
-    refIdx = prev.refIdx;
-    return expand(out);
-  }
-  return Object.assign({}, node, { children: (node.children || []).map(expand) });
+function renderFresh(comp, props) {
+  collectedEffects = [];
+  const tree = fake.renderFresh(comp, props);
+  const effects = collectedEffects.map((e) => e.fn);
+  return { tree, effects };
 }
+
+function renderKeep(comp, props) {
+  return fake.renderKeep(comp, props);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const storageData = new Map();
 const clone = (v) => JSON.parse(JSON.stringify(v));
@@ -161,76 +143,8 @@ const preLoadBoxes = checkboxes(renderFresh(settingsSection.component).tree);
 const disabledBeforeLoad =
   preLoadBoxes.length > 0 && preLoadBoxes.every((b) => b.props && b.props.disabled === true);
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 每次渲染都从零开始：清空 hooks 槽，避免不同组件串状态。
-// 注意同理——要整棵树都清，否则嵌套组件（反馈区）会读到上一次的额度/正文。
-function renderFreshState(comp, props) {
-  states.clear();
-  // refs 槽位键是字符串，`length = 0` 清不掉它们：必须换新数组，
-  // 否则 useRef 里的「只在挂载时跑一次」标志会跨挂载残留。
-  refs = [];
-  stateIdx = 0;
-  refIdx = 0;
-  domain = 'root';
-  domainSeq = new Map();
-  effects = [];
-  return expand(comp(props || {}));
-}
-
-function renderFresh(comp, props) {
-  return { tree: renderFreshState(comp, props), effects };
-}
-
-// 保留组件内部状态的重渲染：用于验证「输入 → 点按钮 → 读结果」这类交互。
-function renderKeep(comp, props) {
-  let tree = null;
-  // 组件渲染期间改状态会立刻重渲染，替身多跑几轮直到稳定
-  for (let pass = 0; pass < 5; pass += 1) {
-    const before = new Map(states);
-    stateIdx = 0;
-    refIdx = 0;
-    domain = 'root';
-    domainSeq = new Map();
-    effects = [];
-    tree = expand(comp(props || {}));
-    let changed = before.size !== states.size;
-    for (const [k, v] of states) {
-      if (!changed && before.get(k) !== v) changed = true;
-    }
-    if (!changed) break;
-  }
-  return tree;
-}
-
-function walk(node, fn) {
-  if (Array.isArray(node)) {
-    for (const n of node) walk(n, fn);
-    return;
-  }
-  if (!node || typeof node !== 'object') return;
-  fn(node);
-  for (const k of Array.isArray(node.children) ? node.children : []) walk(k, fn);
-}
-
-function textOf(node) {
-  if (typeof node === 'string') return node;
-  if (Array.isArray(node)) return node.map(textOf).join('');
-  if (!node || typeof node !== 'object') return '';
-  return (node.children || []).map(textOf).join('');
-}
-
-function find(tree, pred) {
-  let hit = null;
-  walk(tree, (n) => {
-    if (!hit && pred(n)) hit = n;
-  });
-  return hit;
-}
-
-function byClass(tree, cls) {
-  return find(tree, (n) => n.props && typeof n.props.className === 'string' && n.props.className.split(' ').includes(cls));
-}
+// 查询辅助（walk / textOf / byClass / findAll / find）来自 './fake-react.mjs'。
 
 // ---- 第一段：启动扫描 ----
 if (!statusItem || !overlay || !settingsSection || !paletteCommand) {

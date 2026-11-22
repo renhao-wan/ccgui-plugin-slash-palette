@@ -16,7 +16,11 @@ const REPO = path.resolve(HERE, '..');
 const BASE =
   process.env.FEEDBACK_BASE ||
   path.resolve(REPO, '..', 'ccgui-plugin-github-trending', 'src', 'lib', 'feedback.mjs');
-const TARGET = path.join(REPO, 'main.js');
+// 无构建插件的纯函数内联在 main.js 里；有构建的插件保留 src/lib/feedback.mjs，
+// 用 FEEDBACK_TARGET 指过去即可复用同一份检查。
+const TARGET = process.env.FEEDBACK_TARGET
+  ? path.resolve(REPO, process.env.FEEDBACK_TARGET)
+  : path.join(REPO, 'main.js');
 
 // 按函数名切段：从 `function X(` 或 `const X =` 到下一个同级声明。
 // 只在反馈纯函数区间里找，避免把 UI 里的同名局部量算进来。
@@ -107,19 +111,53 @@ const targetSrc = fs.readFileSync(TARGET, 'utf8');
 
 const diffs = [];
 for (const name of NAMES) {
-  // 基准里是 parseJson，无构建插件里为了避免与其它符号冲突叫 parseJsonBody。
-  const localName = name === 'parseJson' ? 'parseJsonBody' : name;
+  // 基准里是 parseJson；无构建插件为了避免与其它符号冲突改叫 parseJsonBody。
+  // 有构建的插件直接复用基准文件，名字不变——两种都试，找到哪种用哪种。
+  const candidates = name === 'parseJson' ? ['parseJsonBody', 'parseJson'] : [name];
   const a = grab(baseSrc, name);
-  const b = grab(targetSrc, localName);
+  let b = null;
+  let usedName = candidates[0];
+  for (const cand of candidates) {
+    b = grab(targetSrc, cand);
+    if (b !== null) {
+      usedName = cand;
+      break;
+    }
+  }
   if (a === null) {
     diffs.push(`${name}：基准里找不到（基准文件结构变了？）`);
     continue;
   }
   if (b === null) {
-    diffs.push(`${name}：main.js 里找不到`);
+    diffs.push(`${name}：${path.basename(TARGET)} 里找不到`);
     continue;
   }
-  if (normalize(a) !== normalize(b)) diffs.push(`${name}：与基准不一致`);
+  if (normalize(a) !== normalize(b)) diffs.push(`${name}：${path.basename(TARGET)} 里与基准不一致（${usedName}）`);
+}
+
+// 网络层：createFeedbackNet 整段内联，同样必须与基准逐字一致。
+// 这段最容易「改一处忘三处」——本次 quotaCount 的 bug 就同时存在于四处，
+// 只因为纯函数层被查才一次抓到；网络层此前完全没人拦。
+const NET_BASE = path.join(path.dirname(BASE), "feedback-net.mjs");
+// 无构建插件里网络层内联在 main.js；有构建的插件是同目录的 feedback-net.mjs。
+// 目标目录下没有同名文件时，退回主目标文件（内联形态）。
+const netTargetPath = path.join(path.dirname(TARGET), "feedback-net.mjs");
+const netTarget =
+  netTargetPath !== TARGET && fs.existsSync(netTargetPath)
+    ? { src: fs.readFileSync(netTargetPath, "utf8"), label: path.basename(netTargetPath) }
+    : { src: targetSrc, label: path.basename(TARGET) };
+
+if (fs.existsSync(NET_BASE)) {
+  const netBase = fs.readFileSync(NET_BASE, "utf8");
+  for (const name of ["fbNetTimeout", "fbNetHostVersion", "createFeedbackNet"]) {
+    const a = grab(netBase, name);
+    const b = grab(netTarget.src, name);
+    if (a === null) diffs.push(`${name}：基准 feedback-net.mjs 里找不到`);
+    else if (b === null) diffs.push(`${name}：${netTarget.label} 里找不到`);
+    else if (normalize(a) !== normalize(b)) diffs.push(`${name}：${netTarget.label} 里与基准 feedback-net.mjs 不一致`);
+  }
+} else if (process.env.CI) {
+  diffs.push("找不到基准 feedback-net.mjs（CI 里请 checkout github-trending 并设置 FEEDBACK_BASE）");
 }
 
 if (diffs.length === 0) {
@@ -127,8 +165,12 @@ if (diffs.length === 0) {
   process.exit(0);
 }
 
-console.log('反馈纯函数与基准不一致：');
+console.log('反馈代码与基准不一致：');
 for (const d of diffs) console.log('  - ' + d);
-console.log('\n基准：' + path.relative(REPO, BASE));
-console.log('把基准里对应的函数整段复制到 main.js，保持逐字一致（只改引号风格与 parseJson 命名）。');
+console.log('\n基准：' + path.relative(REPO, BASE) + ' 与 feedback-net.mjs');
+console.log(
+  '把基准里对应的函数整段复制到 ' +
+    path.basename(TARGET) +
+    '（构建型插件是 src/lib/feedback.mjs），保持逐字一致（只改缩进与 parseJson 命名）。',
+);
 process.exit(1);
