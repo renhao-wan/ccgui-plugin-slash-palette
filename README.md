@@ -124,10 +124,15 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 ## 本地自检
 
 ```bash
-node scripts/check-feedback-sync.mjs  # 反馈纯函数与基准（github-trending/src/lib/feedback.mjs）逐字一致
+npm install                          # 共用层来自 ccgui-plugin-shared（npm 依赖）
+node scripts/build.mjs               # 把共用库内联进 src/main.head.js → main.js
 node scripts/validate-manifest.mjs   # manifest、权限、黑名单、产物大小
 node scripts/smoke.mjs               # 真实调用 PowerShell，验证扫描与写入
 ```
+
+`main.js` 是构建产物：反馈相关的纯函数、网络层与反馈区组件来自
+`ccgui-plugin-shared`，改逻辑请改那个包并升版本，不要直接改产物。改了源码
+忘了构建，CI 的 `git diff --exit-code main.js` 会拦住。
 
 ## 发布
 
