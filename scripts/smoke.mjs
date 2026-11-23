@@ -268,8 +268,9 @@ function findLink(tree, text) {
   return find(tree, (n) => n.type === 'a' && textOf(n).indexOf(text) >= 0);
 }
 
-const okQuota = () => ({ status: 200, body: JSON.stringify({ remaining: 25, dailyLimit: 30 }) });
-const okSend = (remaining) => ({ status: 200, body: JSON.stringify({ ok: true, remaining }) });
+const okQuota = () => ({ status: 200, body: JSON.stringify({ remaining: 1, dailyLimit: 1, fallbackRemaining: 3 }) });
+// 发送成功后本插件即进入 48h 冷却（remaining:0），兜底池少一条。
+const okSend = () => ({ status: 200, body: JSON.stringify({ ok: true, remaining: 0, dailyLimit: 1, fallbackRemaining: 2 }) });
 
 const feedbackChecks = [];
 let feedbackFailed = 0;
@@ -284,7 +285,7 @@ function fb(name, fn) {
 }
 
 await (async () => {
-  await mountFeedback((args) => (args.url.endsWith('/quota') ? okQuota() : okSend(24)));
+  await mountFeedback((args) => (args.url.includes('/quota') ? okQuota() : okSend()));
   const tree = snap();
 
   fb('反馈：两种渠道都在，Issue 链接指向本仓库', () => {
@@ -300,7 +301,7 @@ await (async () => {
 
   fb('反馈：额度文案用服务端回传的真实值', () => {
     const q = textOf(byClass(tree, 'sp-feedback-quota'));
-    assert.ok(q.indexOf('25') >= 0, '应显示 25，实际：' + q);
+    assert.ok(/两天|48/.test(q), '应显示「每两天可提交 1 条」，实际：' + q);
     assert.equal(byClass(tree, 'sp-feedback-quota-retry'), null, '有额度时不该挂重试按钮');
   });
 
@@ -333,10 +334,10 @@ await (async () => {
   });
 
   const sent = snap();
-  fb('反馈：成功后清空正文、按钮显示已发送、额度用回传值', () => {
+  fb('反馈：成功后清空正文、按钮显示已发送、额度反映冷却状态', () => {
     assert.equal(byClass(sent, 'sp-feedback-text').props.value, '');
     assert.ok(textOf(byClass(sent, 'sp-feedback-send')).indexOf('已发送') >= 0, '按钮应变成「已发送」');
-    assert.ok(textOf(byClass(sent, 'sp-feedback-quota')).indexOf('24') >= 0, '额度应更新为 24');
+    assert.ok(/共享|48|两天/.test(textOf(byClass(sent, 'sp-feedback-quota'))), '额度区应反映冷却状态');
     assert.ok(textOf(byClass(sent, 'sp-feedback-status')).indexOf('已发送') >= 0);
   });
 })();
@@ -344,7 +345,7 @@ await (async () => {
 await (async () => {
   // 200 但不是我们的 JSON（运营商劫持页 / 登录门户）
   await mountFeedback((args) =>
-    args.url.endsWith('/quota') ? okQuota() : { status: 200, body: '<html>请登录校园网</html>' },
+    args.url.includes('/quota') ? okQuota() : { status: 200, body: '<html>请登录校园网</html>' },
   );
   byClass(snap(), 'sp-feedback-text').props.onChange({ target: { value: '被劫持' } });
   byClass(snap(), 'sp-feedback-send').props.onClick();
@@ -359,7 +360,7 @@ await (async () => {
 
 await (async () => {
   await mountFeedback((args) => {
-    if (args.url.endsWith('/quota')) return okQuota();
+    if (args.url.includes('/quota')) return okQuota();
     throw new Error('net::ERR_NAME_NOT_RESOLVED');
   });
   byClass(snap(), 'sp-feedback-text').props.onChange({ target: { value: '断网' } });
@@ -374,7 +375,7 @@ await (async () => {
 })();
 
 await (async () => {
-  await mountFeedback((args) => (args.url.endsWith('/quota') ? { status: 500, body: 'boom' } : okSend(23)));
+  await mountFeedback((args) => (args.url.includes('/quota') ? { status: 500, body: 'boom' } : okSend()));
   const tree = snap();
   fb('反馈：额度查不到时说连不上并给重试入口', () => {
     assert.ok(/连不上|暂时/.test(textOf(byClass(tree, 'sp-feedback-quota'))));
@@ -382,30 +383,30 @@ await (async () => {
   });
 
   httpResponder = () => okQuota();
-  const before = httpCalls.filter((c) => c.url.endsWith('/quota')).length;
+  const before = httpCalls.filter((c) => c.url.includes('/quota')).length;
   byClass(snap(), 'sp-feedback-quota-retry').props.onClick();
   await sleep(80);
   fb('反馈：重试按钮会重新查额度', () => {
-    assert.equal(httpCalls.filter((c) => c.url.endsWith('/quota')).length, before + 1);
-    assert.ok(textOf(byClass(snap(), 'sp-feedback-quota')).indexOf('25') >= 0);
+    assert.equal(httpCalls.filter((c) => c.url.includes('/quota')).length, before + 1);
+    assert.ok(/两天|48/.test(textOf(byClass(snap(), 'sp-feedback-quota'))));
   });
 
   // 发送成功时顺手把「连不上」纠正成服务端回传的额度
-  httpResponder = (args) => (args.url.endsWith('/quota') ? { status: 500, body: 'boom' } : okSend(23));
+  httpResponder = (args) => (args.url.includes('/quota') ? { status: 500, body: 'boom' } : okSend());
   byClass(snap(), 'sp-feedback-text').props.onChange({ target: { value: '一条反馈' } });
   byClass(snap(), 'sp-feedback-send').props.onClick();
   await sleep(80);
   const after = snap();
   fb('反馈：额度查不到但发送成功，额度区不再停留在连不上', () => {
     const q = textOf(byClass(after, 'sp-feedback-quota'));
-    assert.ok(q.indexOf('23') >= 0, q);
+    assert.ok(/共享|48|两天/.test(q), q);
     assert.ok(q.indexOf('连不上') < 0, q);
   });
 })();
 
 await (async () => {
   await mountFeedback((args) =>
-    args.url.endsWith('/quota')
+    args.url.includes('/quota')
       ? okQuota()
       : { status: 429, body: '{"ok":false,"error":"rate_limited","kind":"burst","remaining":25}' },
   );
@@ -413,10 +414,10 @@ await (async () => {
   byClass(snap(), 'sp-feedback-send').props.onClick();
   await sleep(80);
   const t = snap();
-  fb('反馈：突发限流说稍等几分钟，不谎报今天用完', () => {
+  fb('反馈：突发限流说稍等几分钟，不谎报额度耗尽', () => {
     const s = textOf(byClass(t, 'sp-feedback-status'));
     assert.ok(/太快|稍候|分钟/.test(s), s);
-    assert.ok(s.indexOf('明天') < 0, '突发不该说成今天用完');
+    assert.ok(s.indexOf('48') < 0, '突发不该说成 48 小时冷却');
   });
 })();
 
@@ -424,16 +425,15 @@ await (async () => {
   // 回归：中转返回 ok:true 但没带 remaining（旧版中转）。旧写法
   // Number.isFinite(Number(null)) === true 会把它读成 0，界面谎报「今天用完」。
   await mountFeedback((args) =>
-    args.url.endsWith('/quota') ? okQuota() : { status: 200, body: '{"ok":true}' },
+    args.url.includes('/quota') ? okQuota() : { status: 200, body: '{"ok":true}' },
   );
   byClass(snap(), 'sp-feedback-text').props.onChange({ target: { value: '没有 remaining' } });
   byClass(snap(), 'sp-feedback-send').props.onClick();
   await sleep(80);
   const t = snap();
-  fb('反馈：中转没回传额度时按旧值自减，不说「今天用完」', () => {
+  fb('反馈：中转没回传额度时自减，不谎报额度耗尽', () => {
     const q = textOf(byClass(t, 'sp-feedback-quota'));
-    assert.ok(q.indexOf('24') >= 0, '应自减为 24，实际：' + q);
-    assert.ok(q.indexOf('用完') < 0, '不能谎报额度耗尽：' + q);
+    assert.ok(/共享|48|两天/.test(q), '应自减并显示冷却文案，实际：' + q);
     assert.ok(textOf(byClass(t, 'sp-feedback-send')).indexOf('已发送') >= 0);
   });
 })();

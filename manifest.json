@@ -1,7 +1,7 @@
 {
   "id": "slash-palette",
   "name": "Claude 斜杠命令",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "sdkVersion": "^0.3",
   "minAppVersion": "1.0.4",
   "author": "renhao-wan",
@@ -9,7 +9,14 @@
   "repo": "renhao-wan/ccgui-plugin-slash-palette",
   "icon": "docs/icon.png",
   "license": "MIT",
-  "keywords": ["claude", "claude-code", "slash", "command", "palette", "skill"],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "slash",
+    "command",
+    "palette",
+    "skill"
+  ],
   "tier": "js",
   "permissions": [
     "ui:composer-status",
