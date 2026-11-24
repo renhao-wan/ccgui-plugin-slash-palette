@@ -26,23 +26,25 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 ## 功能
 
 - 状态行「/ 命令」按钮，点击打开居中面板；CC GUI 命令面板搜「斜杠」也能唤起。
-- 只列 Claude Code 已启用的插件命令与技能，避免选到不可用的命令。
+- 列出当前工作区的项目命令/技能、用户级命令/技能与已启用插件的命令/技能；项目级禁用（`enabledPlugins` / `skillOverrides`）的条目不会出现，避免插入后执行报错。
 - 搜索命令名或 frontmatter 里的 `description`。
 - 键盘 `↑` `↓` 选择、`Enter` 写入、`Esc` 关闭；鼠标同样可用。
 - 按来源分组，可在设置页逐项开关。
-- 扫描结果缓存 10 分钟，过期后台重扫；扫描失败保留旧缓存，空结果不写缓存。
+- 扫描结果缓存 5 分钟：点开面板时若超过 5 分钟会自动重扫，未超时直接复用；面板底部有「刷新」按钮可随时强制重扫。扫描失败保留旧缓存，空结果不写缓存。
 
 ## 命令来源
 
 | 来源 | 路径 | 调用名 |
 |---|---|---|
+| 项目命令 | `<workspace>/.claude/commands/**/*.md` | `/命令名` |
+| 项目技能 | `<workspace>/.claude/skills/*/SKILL.md` | `/技能名` |
 | 插件命令 | Claude Code 记录的插件安装目录（`installed_plugins.json` 的 `installPath`） | `/插件名:命令名` |
 | 插件技能 | 同上 | `/插件名:技能名` |
 | 用户命令 | `~/.claude/commands/**/*.md` | `/命令名` |
 | 用户技能 | `~/.claude/skills/*/SKILL.md` | `/技能名` |
 | 内置命令（默认关闭） | 插件内置 | `/help` 等 |
 
-只展示 Claude Code **已启用**的插件：启用状态读取 `~/.claude/settings.json` 的 `enabledPlugins`，装了但没启用的插件不会出现在列表里。没有 `installed_plugins.json` 时回退到遍历 `plugins/cache`，同一插件有多个缓存版本时以记录的安装目录为准，其次按修改时间与版本号选择。
+同名命令的优先级是 **项目 > 用户**；同名技能是 **个人 > 项目**（与 Claude Code 的 skills 优先级一致）。插件启用状态按 **本地 `.claude/settings.local.json` > 团队 `.claude/settings.json` > 全局 `~/.claude/settings.json`** 逐键合并 `enabledPlugins`（任一层写了 `enabledPlugins`，即使为空对象，也按清单生效）；`skillOverrides` 只作用于个人/项目技能（`off` 隐藏、`name-only` 只留名称），插件技能不受本地开关控制。被当前工作区禁用的条目会从列表里移除，状态行显示「已隐藏 N 条」。没有 `installed_plugins.json` 时回退到遍历 `plugins/cache`，同一插件有多个缓存版本时以记录的安装目录为准，其次按修改时间与版本号选择。设了 `CLAUDE_CONFIG_DIR` 时全局层跟着切换。
 
 ## 已知限制
 
@@ -50,8 +52,8 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 2. **不会自动发送**：写入后仍需你自己按发送。
 3. **弹层是居中浮层**：SDK 不暴露输入框坐标，插件也不能读宿主 DOM，无法做成紧贴输入框的下拉。
 4. **Windows 专用**：扫描走 `exec:powershell`。macOS / Linux 需要另加 `exec:sh` 与第二套脚本，当前版本未实现。
-5. **首次打开有扫描延迟**：缓存缺失或过期时，打开面板（或设置页点「立即刷新」）会调用 PowerShell 扫描本机命令目录，通常 1–2 秒；之后 10 分钟内直接读缓存。
-6. **只认用户级启用清单**：不读取项目级 `.claude/settings.json` 的 `enabledPlugins`，只在某个项目里启用的插件不会显示。
+5. **首次打开有扫描延迟**：缓存缺失或过期（超过 5 分钟）时，打开面板（或面板底部点「刷新」、设置页点「立即刷新」）会调用 PowerShell 扫描本机命令目录，通常 1–2 秒；之后 5 分钟内直接读缓存。
+6. **不读企业 managed settings**：只合并全局、仓库共享（团队）与本地三层；企业/系统级强制配置目前不参与判断。
 
 ## 权限
 
@@ -65,6 +67,7 @@ CC GUI 插件 SDK（0.3.x）的 composer 能力只有 `ctx.composer.setDraft(tex
 | `exec:powershell` | 列目录、读 frontmatter |
 | `theme` | 通过宿主主题接口注入插件样式（老宿主回退到组件内联） |
 | `storage` | 缓存命令列表与设置 |
+| `workspace.metadata.read` | 读取当前会话所在工作区路径，用于扫描项目层命令与覆盖配置 |
 | `network:ccgui-feedback.2653990378.workers.dev` | 「发送反馈」：把你填的那段文字转发到作者邮箱。不点就不会发 |
 
 `exec:powershell` 只执行插件内置的只读扫描脚本：列目录、读命令文件的 frontmatter，不写入。除你主动点「发送反馈」外不发起任何网络请求——扫描本身不联网。

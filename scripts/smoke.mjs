@@ -4,6 +4,8 @@
 // 通过直接调用 props 回调覆盖，不覆盖真实 React 生命周期。
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import assert from 'node:assert/strict';
 
 const PLUGIN = new URL('../main.js', import.meta.url).href;
@@ -207,9 +209,37 @@ const settingsTree = renderFresh(settingsSection.component).tree;
 const settingsText = textOf(settingsTree);
 
 // ---- 第六段：命令面板入口 ----
+// TTL 内（刚扫完）再打开面板不应触发第二次扫描，否则等于每次点开都重扫。
+const execBeforeReopen = execCalls.length;
 paletteCommand.run();
 const reopened = renderFresh(overlay.component).tree;
 const reopenedSearch = byClass(reopened, 'sp-search');
+await sleep(400);
+const noRescanWithinTtl = execCalls.length === execBeforeReopen;
+
+// 面板底部刷新按钮：手动强制重扫，不看 TTL。
+const refreshBtn = byClass(reopened, 'sp-refresh');
+const hasRefreshBtn = !!refreshBtn && textOf(refreshBtn).indexOf('刷新') >= 0;
+const execBeforeRefresh = execCalls.length;
+if (refreshBtn && refreshBtn.props.onClick) refreshBtn.props.onClick();
+await sleep(400);
+const refreshRescans = execCalls.length > execBeforeRefresh;
+
+// 超过 TTL 后再打开面板必须强制重扫（用假时钟快进，不改系统时间）。
+// 先等手动刷新那次扫描落定，否则快进后的重扫会被 inflight 去重吃掉。
+for (let i = 0; i < 100; i++) {
+  await sleep(100);
+  const t = textOf(renderFresh(overlay.component).tree || []);
+  if (t.indexOf('正在扫描') < 0) break;
+}
+const realNow = Date.now;
+const skew = 6 * 60 * 1000; // 超过 5 分钟 TTL
+Date.now = () => realNow() + skew;
+const execBeforeStale = execCalls.length;
+paletteCommand.run();
+await sleep(400);
+Date.now = realNow;
+const staleRescans = execCalls.length > execBeforeStale;
 
 // ---- 第七段：Esc 在面板容器上生效（模拟焦点不在搜索框）----
 const reopenedPanel = byClass(reopened, 'sp-panel');
@@ -227,18 +257,35 @@ function checkboxes(tree) {
   });
   return out;
 }
-const firstBoxes = checkboxes(renderFresh(settingsSection.component).tree);
-if (firstBoxes[0]) firstBoxes[0].props.onChange(); // 关闭「插件命令与技能」
-const secondBoxes = checkboxes(renderFresh(settingsSection.component).tree);
-if (secondBoxes[2]) secondBoxes[2].props.onChange(); // 打开「内置命令」
-const thirdBoxes = checkboxes(renderFresh(settingsSection.component).tree);
+// 按设置行标题找开关：新增「项目命令」开关后，按下标取会张冠李戴。
+function boxFor(tree, title) {
+  const row = find(
+    tree,
+    (n) =>
+      n.props &&
+      typeof n.props.className === 'string' &&
+      n.props.className.split(' ').includes('sp-setting') &&
+      textOf(n).indexOf(title) >= 0,
+  );
+  if (!row) return null;
+  let box = null;
+  walk(row, (n) => {
+    if (!box && n.type === 'input' && n.props && n.props.type === 'checkbox') box = n;
+  });
+  return box;
+}
+const boxPlugins = boxFor(renderFresh(settingsSection.component).tree, '插件命令与技能');
+if (boxPlugins) boxPlugins.props.onChange(); // 关闭「插件命令与技能」
+const boxBuiltin = boxFor(renderFresh(settingsSection.component).tree, '内置命令');
+if (boxBuiltin) boxBuiltin.props.onChange(); // 打开「内置命令」
+const afterToggle = renderFresh(settingsSection.component).tree;
 const togglesIndependent = !!(
-  thirdBoxes[0] &&
-  thirdBoxes[0].props.checked === false &&
-  thirdBoxes[2] &&
-  thirdBoxes[2].props.checked === true
+  boxFor(afterToggle, '插件命令与技能') &&
+  boxFor(afterToggle, '插件命令与技能').props.checked === false &&
+  boxFor(afterToggle, '内置命令') &&
+  boxFor(afterToggle, '内置命令').props.checked === true
 );
-const enabledAfterLoad = thirdBoxes.length > 0 && thirdBoxes.every((b) => b.props.disabled !== true);
+const enabledAfterLoad = checkboxes(afterToggle).every((b) => b.props.disabled !== true) && checkboxes(afterToggle).length > 0;
 
 // ---- 第七段：卸载清理 ----
 let disposeOk = true;
@@ -445,6 +492,236 @@ try {
   feedbackFailed += 1;
 }
 
+// ---- 第九段：项目/团队层与禁用覆盖 ----
+// fixture 全部落在临时目录：CLAUDE_CONFIG_DIR 隔离全局层，工作区用 getMetadata 注入。
+// 独立 import 一份模块（query 串避开上面的 import 缓存），入口各自捕获。
+const layered = {
+  projCmd: false,
+  projSkill: false,
+  userOnly: false,
+  projectWins: false,
+  pluginHidden: false,
+  offHidden: false,
+  hiddenHint: false,
+  projectToggle: false,
+  projectDiag: false,
+  wsSwitch: false,
+  skillPrecedence: false,
+  toggleFallback: false,
+  pluginSkillKeeps: false,
+  emptyListHides: false,
+  pathNormalized: false,
+  nullWsKeeps: false,
+};
+
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "slash-palette-fixture-"));
+{
+  const cfgDir = path.join(tmpRoot, "config");
+  const pluginDir = path.join(tmpRoot, "plugin");
+  const wsDir = path.join(tmpRoot, "ws");
+  const write = (rel, text) => {
+    const file = path.join(tmpRoot, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text, "utf8");
+  };
+  const cmd = (desc) => `---\ndescription: ${desc}\n---\nbody\n`;
+  const skill = (name, desc) => `---\nname: ${name}\ndescription: ${desc}\n---\nbody\n`;
+
+  write("config/settings.json", JSON.stringify({ enabledPlugins: { "demo@mkt": true } }));
+  write(
+    "config/plugins/installed_plugins.json",
+    JSON.stringify({
+      version: 2,
+      plugins: { "demo@mkt": [{ scope: "user", installPath: pluginDir }] },
+    }),
+  );
+  write("config/commands/useronly.md", cmd("USER ONLY"));
+  write("config/commands/dup.md", cmd("CMD-FROM-USER"));
+  write("config/skills/offskill/SKILL.md", skill("offskill", "USER OFF SKILL"));
+  write("config/skills/dupskill/SKILL.md", skill("dupskill", "SKILL-FROM-USER"));
+
+  write("plugin/commands/pcmd.md", cmd("PLUGIN CMD"));
+  write("plugin/skills/pskill/SKILL.md", skill("pskill", "PLUGIN SKILL"));
+
+  write("ws/.claude/commands/projcmd.md", cmd("PROJECT CMD"));
+  write("ws/.claude/commands/dup.md", cmd("CMD-FROM-PROJECT"));
+  write("ws/.claude/skills/projskill/SKILL.md", skill("projskill", "PROJECT SKILL"));
+  write("ws/.claude/skills/projoff/SKILL.md", skill("projoff", "PROJECT OFF SKILL"));
+  write("ws/.claude/skills/dupskill/SKILL.md", skill("dupskill", "SKILL-FROM-PROJECT"));
+  // 团队层禁用插件；项目技能 offskill / projoff 关闭。
+  write(
+    "ws/.claude/settings.json",
+    JSON.stringify({
+      enabledPlugins: { "demo@mkt": false },
+      skillOverrides: { offskill: "off", projoff: "off" },
+    }),
+  );
+
+  const prevConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = cfgDir;
+  let layeredDispose = null;
+  try {
+    let fItem = null;
+    let fOverlay = null;
+    let fSettings = null;
+    let fCommand = null;
+    let layeredWs = wsDir;
+    const layeredStorage = new Map();
+    const layeredCtx = {
+      ...ctx,
+      storage: {
+        get: async (k) => (layeredStorage.has(k) ? clone(layeredStorage.get(k)) : null),
+        set: async (k, v) => layeredStorage.set(k, clone(v)),
+        delete: async (k) => layeredStorage.delete(k),
+      },
+      workspace: { getMetadata: async () => ({ path: layeredWs }) },
+      ui: {
+        ...ctx.ui,
+        registerComposerStatusItem: (def) => {
+          fItem = def;
+          return () => {};
+        },
+        registerOverlay: (def) => {
+          fOverlay = def;
+          return () => {};
+        },
+        registerSettingsSection: (def) => {
+          fSettings = def;
+          return () => {};
+        },
+        registerCommand: (def) => {
+          fCommand = def;
+          return () => {};
+        },
+      },
+    };
+    const mod2 = await import(PLUGIN + "?layered=1");
+    layeredDispose = mod2.default(layeredCtx);
+    const invokesOf = (tree) => {
+      const out = [];
+      walk(tree, (n) => {
+        if (n.props && typeof n.props.className === "string" && n.props.className.split(" ").includes("sp-invoke")) {
+          out.push(textOf(n));
+        }
+      });
+      return out;
+    };
+    const overlayNow = () => {
+      const tree = renderFresh(fOverlay.component).tree;
+      return { text: textOf(tree || ""), inv: invokesOf(tree) };
+    };
+    async function waitFor(pred) {
+      for (let i = 0; i < 120; i++) {
+        await sleep(100);
+        const now = overlayNow();
+        if (pred(now)) return now;
+      }
+      return overlayNow();
+    }
+    const clickRefresh = () => {
+      const tree = renderFresh(fSettings.component).tree;
+      const btn = find(tree, (n) => n.type === "button" && textOf(n).indexOf("立即刷新") >= 0);
+      if (btn && btn.props.onClick) btn.props.onClick();
+    };
+    fCommand.run();
+
+    let overlayText2 = "";
+    let invokes2 = [];
+    for (let i = 0; i < 120; i++) {
+      await sleep(100);
+      const tree = renderFresh(fOverlay.component).tree;
+      overlayText2 = textOf(tree || []);
+      invokes2 = [];
+      walk(tree, (n) => {
+        if (n.props && typeof n.props.className === "string" && n.props.className.split(" ").includes("sp-invoke")) {
+          invokes2.push(textOf(n));
+        }
+      });
+      if (overlayText2.indexOf("正在扫描") < 0 && invokes2.length > 0) break;
+    }
+
+    layered.projCmd = invokes2.includes("/projcmd");
+    layered.projSkill = invokes2.includes("/projskill");
+    layered.userOnly = invokes2.includes("/useronly");
+    layered.projectWins = overlayText2.includes("CMD-FROM-PROJECT") && !overlayText2.includes("CMD-FROM-USER");
+    // 同名技能反过来：个人 > 项目。
+    layered.skillPrecedence =
+      overlayText2.includes("SKILL-FROM-USER") && !overlayText2.includes("SKILL-FROM-PROJECT");
+    layered.pluginHidden = !invokes2.includes("/demo:pcmd") && !invokes2.includes("/demo:pskill");
+    layered.offHidden = !invokes2.includes("/offskill") && !invokes2.includes("/projoff");
+    layered.hiddenHint = overlayText2.indexOf("已隐藏 4 条") >= 0;
+
+    const settingsTree2 = renderFresh(fSettings.component).tree;
+    const settingsText2 = textOf(settingsTree2);
+    layered.projectToggle = settingsText2.indexOf("项目命令与技能") >= 0;
+    layered.projectDiag = settingsText2.indexOf("工作区：") >= 0;
+
+    // 切换工作区：路径变了应立即重扫，项目层命令随之从列表里消失。
+    const ws2 = path.join(tmpRoot, "ws2");
+    layeredWs = ws2;
+    fs.mkdirSync(layeredWs, { recursive: true });
+    const execBeforeSwitch = execCalls.length;
+    fCommand.run();
+    for (let i = 0; i < 120; i++) {
+      await sleep(100);
+      const tree = renderFresh(fOverlay.component).tree;
+      const inv = [];
+      walk(tree, (n) => {
+        if (n.props && typeof n.props.className === "string" && n.props.className.split(" ").includes("sp-invoke")) {
+          inv.push(textOf(n));
+        }
+      });
+      if (execCalls.length > execBeforeSwitch && !inv.includes("/projcmd") && inv.includes("/useronly")) {
+        layered.wsSwitch = true;
+        break;
+      }
+    }
+
+    // 关掉「项目命令与技能」后，同名用户命令必须回补，而不是彻底消失。
+    const projBox = boxFor(renderFresh(fSettings.component).tree, "项目命令与技能");
+    if (projBox) projBox.props.onChange();
+    fCommand.run();
+    const afterOff = await waitFor(
+      ({ text, inv }) => !inv.includes("/projcmd") && text.includes("CMD-FROM-USER") && !text.includes("CMD-FROM-PROJECT"),
+    );
+    layered.toggleFallback = afterOff.text.includes("CMD-FROM-USER") && !afterOff.text.includes("CMD-FROM-PROJECT");
+    const projBox2 = boxFor(renderFresh(fSettings.component).tree, "项目命令与技能");
+    if (projBox2) projBox2.props.onChange();
+
+    // 插件技能不吃 skillOverrides：把 pskill 写成 off，仍应列出 /demo:pskill。
+    write("ws2/.claude/settings.json", JSON.stringify({ skillOverrides: { pskill: "off" } }));
+    clickRefresh();
+    const plugged = await waitFor(({ inv }) => inv.includes("/demo:pskill"));
+    layered.pluginSkillKeeps = plugged.inv.includes("/demo:pskill");
+
+    // 空 enabledPlugins 表示「没有插件被启用」，不是「不做过滤」。
+    write("config/settings.json", JSON.stringify({ enabledPlugins: {} }));
+    clickRefresh();
+    const emptied = await waitFor(({ inv }) => !inv.includes("/demo:pcmd") && !inv.includes("/demo:pskill"));
+    layered.emptyListHides = !emptied.inv.includes("/demo:pcmd") && !emptied.inv.includes("/demo:pskill");
+
+    // 路径只差尾分隔符和空白时不能触发重扫。
+    layeredWs = ws2 + "\\  ";
+    const execBeforeNorm = execCalls.length;
+    fCommand.run();
+    await sleep(700);
+    layered.pathNormalized = execCalls.length === execBeforeNorm;
+    layeredWs = ws2;
+
+    // getMetadata 返回 null（超时/未授权）时沿用上次工作区，不发起空扫描。
+    layeredWs = null;
+    const execBeforeNull = execCalls.length;
+    fCommand.run();
+    await sleep(500);
+    layered.nullWsKeeps = execCalls.length === execBeforeNull;
+    layeredWs = ws2;
+  } finally {
+    if (layeredDispose) layeredDispose();
+    process.env.CLAUDE_CONFIG_DIR = prevConfigDir;
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
 const checks = [
   ['注册了状态行控件', !!statusItem],
   ['注册了 overlay', !!overlay],
@@ -475,15 +752,35 @@ const checks = [
   ['草稿命令属于插件命名空间', /^\/[^/\s]+:[^/\s]+/.test(lastDraft)],
 
   ['设置页渲染出来源开关', settingsText.indexOf('插件命令与技能') >= 0],
-  ['设置页不再出现项目级开关', settingsText.indexOf('项目命令与技能') < 0],
+  ['设置页渲染出项目命令开关', settingsText.indexOf('项目命令与技能') >= 0],
   ['设置页渲染出刷新按钮', settingsText.indexOf('立即刷新') >= 0],
   ['设置页渲染出诊断路径', settingsText.indexOf('CLI 目录') >= 0],
 
   ['命令面板入口能重新打开面板', !!reopenedSearch],
+  ['TTL 内重新打开面板不重扫', noRescanWithinTtl],
+  ['超过 TTL 后打开面板会重扫', staleRescans],
+  ['面板底部有刷新按钮', hasRefreshBtn],
+  ['点面板刷新按钮会强制重扫', refreshRescans],
   ['面板容器响应 Esc（焦点不在搜索框也有效）', escClosed],
   ['连续切换两个开关互不覆盖', togglesIndependent],
   ['设置加载完成前开关禁用', disabledBeforeLoad],
   ['设置加载完成后开关可用', enabledAfterLoad],
+  ['项目命令出现在面板', layered.projCmd],
+  ['项目技能出现在面板', layered.projSkill],
+  ['CLAUDE_CONFIG_DIR 生效（用户命令来自 fixture）', layered.userOnly],
+  ['同名项目命令覆盖用户命令', layered.projectWins],
+  ['项目层禁用插件后其命令与技能不出现', layered.pluginHidden],
+  ['skillOverrides=off 的技能不出现', layered.offHidden],
+  ['状态行提示隐藏数量', layered.hiddenHint],
+  ['设置页有项目命令开关', layered.projectToggle],
+  ['设置页诊断显示工作区', layered.projectDiag],
+  ['切换工作区后重扫并移除旧项目命令', layered.wsSwitch],
+  ['同名技能个人版覆盖项目版', layered.skillPrecedence],
+  ['关掉项目开关后同名用户命令回补', layered.toggleFallback],
+  ['插件技能不受 skillOverrides 影响', layered.pluginSkillKeeps],
+  ['空 enabledPlugins 会隐藏全部插件命令', layered.emptyListHides],
+  ['路径仅差尾分隔符/空白时不重扫', layered.pathNormalized],
+  ['工作区取不到时沿用上次且不重扫', layered.nullWsKeeps],
   ['样式通过宿主主题注入一次', injectedCss.length >= 1 && injectedCss[0].indexOf('.sp-chip') >= 0],
   ['卸载函数可安全执行', disposeOk],
   ...feedbackChecks,

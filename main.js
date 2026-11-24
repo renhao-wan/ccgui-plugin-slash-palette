@@ -5,7 +5,9 @@
 const PLUGIN_ID = 'slash-palette';
 const CACHE_KEY = 'slash-palette-cache-v1';
 const SETTINGS_KEY = 'slash-palette-settings-v1';
-const CACHE_TTL = 10 * 60 * 1000;
+// 同时用于两处：启动时是否信任磁盘缓存，以及点开面板时是否重扫。
+// 一次扫描只是读几十个 .md，耗时通常在 1 秒内，5 分钟足够及时。
+const CACHE_TTL = 5 * 60 * 1000;
 // 反馈中转。改主机名要同步 manifest.json 的 network:<host>（精确匹配，不支持通配）。
 const FEEDBACK_ENDPOINT = 'https://ccgui-feedback.2653990378.workers.dev';
 const FEEDBACK_REPO = 'renhao-wan/ccgui-plugin-slash-palette';
@@ -15,11 +17,14 @@ const FEEDBACK_TIMEOUT_MS = 15000;
 const DEFAULT_SETTINGS = {
   plugins: true,
   user: true,
+  project: true,
   builtin: false,
   showDesc: true,
 };
 
 const GROUP_LABEL = {
+  'project-command': '项目命令',
+  'project-skill': '项目技能',
   'user-command': '用户命令',
   'user-skill': '用户技能',
   'plugin-command': '插件命令',
@@ -28,6 +33,8 @@ const GROUP_LABEL = {
 };
 
 const GROUP_ORDER = [
+  'project-command',
+  'project-skill',
   'user-command',
   'user-skill',
   'plugin-command',
@@ -975,6 +982,7 @@ const UI_CSS = `
 .sp-foot {
   display: flex;
   gap: 12px;
+  align-items: center;
   justify-content: space-between;
   padding: 8px 14px;
   border-top: 1px solid var(--color-separator-border, rgba(127,127,127,.2));
@@ -982,6 +990,25 @@ const UI_CSS = `
   font-size: 11px;
 }
 .sp-foot-warn { color: var(--color-warning-default, #9a6700); }
+.sp-foot-right { display: inline-flex; align-items: center; gap: 10px; }
+.sp-refresh {
+  padding: 2px 8px;
+  border: 1px solid var(--color-separator-border, rgba(127,127,127,.28));
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-secondary, #656d76);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.sp-refresh:hover:not(:disabled) {
+  background: var(--color-background-tertiary-hover, rgba(127,127,127,.12));
+  color: var(--color-text-primary, #1f2328);
+  border-color: var(--color-accent-primary-default, #3b82f6);
+}
+.sp-refresh:disabled { opacity: .5; cursor: not-allowed; }
 .sp-settings { display: flex; flex-direction: column; gap: 12px; padding: 4px 0; }
 .sp-setting {
   display: flex;
@@ -1060,26 +1087,49 @@ const UI_CSS = `
 .sp-btn.sp-feedback-sent { border-color: var(--color-text-success, #2e7d32); color: var(--color-text-success, #2e7d32); opacity: 1; cursor: default; }
 `;
 
-// PowerShell 用 -EncodedCommand 传入，必须是 UTF-16LE + base64
-function toEncodedCommand(script) {
-  const bytes = new Uint8Array(script.length * 2);
-  for (let i = 0; i < script.length; i++) {
-    const c = script.charCodeAt(i);
-    bytes[i * 2] = c & 0xff;
-    bytes[i * 2 + 1] = (c >> 8) & 0xff;
+// 工作区路径可能含空格、引号、反斜杠和中文：编码成 base64 再交给
+// PowerShell 解码，避免把路径拼进脚本时被当成语法。
+function toBase64Utf8(text) {
+  const s = String(text || '');
+  const bytes = new Uint8Array(s.length * 3);
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    let c = s.charCodeAt(i);
+    if (c < 0x80) {
+      bytes[n++] = c;
+    } else if (c < 0x800) {
+      bytes[n++] = 0xc0 | (c >> 6);
+      bytes[n++] = 0x80 | (c & 0x3f);
+    } else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      const lo = s.charCodeAt(i + 1);
+      if (lo >= 0xdc00 && lo <= 0xdfff) {
+        c = 0x10000 + ((c - 0xd800) << 10) + (lo - 0xdc00);
+        i++;
+        bytes[n++] = 0xf0 | (c >> 18);
+        bytes[n++] = 0x80 | ((c >> 12) & 0x3f);
+        bytes[n++] = 0x80 | ((c >> 6) & 0x3f);
+        bytes[n++] = 0x80 | (c & 0x3f);
+      } else {
+        bytes[n++] = 0xef;
+        bytes[n++] = 0xbf;
+        bytes[n++] = 0xbd;
+      }
+    } else {
+      bytes[n++] = 0xe0 | (c >> 12);
+      bytes[n++] = 0x80 | ((c >> 6) & 0x3f);
+      bytes[n++] = 0x80 | (c & 0x3f);
+    }
   }
   let bin = '';
   const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  for (let i = 0; i < n; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + CHUNK, n)));
   }
-  let b64 = '';
   try {
-    b64 = btoa(bin);
+    return btoa(bin);
   } catch {
     return '';
   }
-  return b64;
 }
 
 const SCAN_SCRIPT = String.raw`
@@ -1089,22 +1139,79 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 
 $homeDir = $env:USERPROFILE
 if ([string]::IsNullOrWhiteSpace($homeDir)) { $homeDir = $HOME }
-$claudeDir = Join-Path $homeDir '.claude'
+# CLAUDE_CONFIG_DIR 有值时 Claude Code 会把 settings.json / plugins / projects 整体搬过去。
+$claudeDir = if ([string]::IsNullOrWhiteSpace($env:CLAUDE_CONFIG_DIR)) {
+  Join-Path $homeDir '.claude'
+} else {
+  [IO.Path]::GetFullPath($env:CLAUDE_CONFIG_DIR)
+}
+
+# 工作区路径由 JS 侧 base64 传入，避免引号、空格、中文破坏脚本语法。
+$ws = ''
+if (-not [string]::IsNullOrWhiteSpace($wsB64)) {
+  try { $ws = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($wsB64)) } catch { $ws = '' }
+}
+if (-not [string]::IsNullOrWhiteSpace($ws)) { $ws = $ws.Trim() }
 
 $rows = New-Object System.Collections.ArrayList
-$seen = @{}
+$hidden = 0
+
+function Load-Json {
+  param([string]$Path)
+  if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+  if (-not (Test-Path -LiteralPath $Path)) { return $null }
+  try {
+    $text = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    return ($text | ConvertFrom-Json)
+  } catch { return $null }
+}
+
+$globalCfg = Load-Json (Join-Path $claudeDir 'settings.json')
+$teamCfg = $null
+$localCfg = $null
+if (-not [string]::IsNullOrWhiteSpace($ws)) {
+  $wsSettings = Join-Path (Join-Path $ws '.claude') 'settings.json'
+  $wsLocal = Join-Path (Join-Path $ws '.claude') 'settings.local.json'
+  $teamCfg = Load-Json $wsSettings
+  $localCfg = Load-Json $wsLocal
+}
+
+# 三层逐键合并：本地 > 团队 > 全局。项目层 false 能压过全局 true。
+# 只要某一层显式写了 enabledPlugins（哪怕是空对象 {}），就按「清单存在」处理：
+# 空清单意味着没有插件被启用，而不是「不做过滤」。
+$enabledMap = @{}
+$skillOv = @{}
+$hasEnabledList = $false
+foreach ($layer in @($globalCfg, $teamCfg, $localCfg)) {
+  if ($layer -and $layer.PSObject.Properties['enabledPlugins'] -and $null -ne $layer.enabledPlugins) {
+    $hasEnabledList = $true
+    foreach ($p in $layer.enabledPlugins.PSObject.Properties) { $enabledMap[[string]$p.Name] = $p.Value }
+  }
+  if ($layer -and $layer.PSObject.Properties['skillOverrides'] -and $layer.skillOverrides) {
+    foreach ($p in $layer.skillOverrides.PSObject.Properties) { $skillOv[[string]$p.Name] = [string]$p.Value }
+  }
+}
+
+# skillOverrides 只作用于个人/项目技能；插件技能不受本地开关控制（与 workspace-config 一致）。
+function Skill-State {
+  param([string]$Name)
+  if ($skillOv.ContainsKey($Name)) { return [string]$skillOv[$Name] }
+  return ''
+}
 
 function Read-Meta {
   param([string]$Path)
   $desc = ''
   $hint = ''
+  $name = ''
   # 读前 160 行足以覆盖 frontmatter；超长 frontmatter 的命令极少数会丢 description
   $lines = @(Get-Content -LiteralPath $Path -TotalCount 160 -Encoding UTF8 -ErrorAction SilentlyContinue)
-  if ($lines.Count -eq 0) { return [pscustomobject]@{ description = ''; hint = '' } }
+  if ($lines.Count -eq 0) { return [pscustomobject]@{ name = ''; description = ''; hint = '' } }
   $i = 0
   while ($i -lt $lines.Count -and [string]::IsNullOrWhiteSpace([string]$lines[$i])) { $i++ }
   if ($i -ge $lines.Count -or ([string]$lines[$i]).Trim() -ne '---') {
-    return [pscustomobject]@{ description = ''; hint = '' }
+    return [pscustomobject]@{ name = ''; description = ''; hint = '' }
   }
   $field = ''
   $buf = New-Object System.Collections.ArrayList
@@ -1117,7 +1224,9 @@ function Read-Meta {
       $field = ''
       $buf.Clear()
     }
-    if ($line -match '^description:\s*(.*)$') {
+    if ($line -match '^name:\s*(.*)$') {
+      $name = $Matches[1].Trim().Trim('"').Trim("'")
+    } elseif ($line -match '^description:\s*(.*)$') {
       $v = $Matches[1].Trim()
       if ($v -eq '|' -or $v -eq '>' -or $v -eq '|-' -or $v -eq '>-' -or $v -eq '|+' -or $v -eq '>+') { $field = 'description' }
       else { $desc = $v.Trim('"').Trim("'") }
@@ -1129,15 +1238,13 @@ function Read-Meta {
   }
   if ($field -eq 'description' -and $buf.Count -gt 0) { $desc = ($buf -join ' ') }
   elseif ($field -eq 'hint' -and $buf.Count -gt 0) { $hint = ($buf -join ' ') }
-  return [pscustomobject]@{ description = $desc; hint = $hint }
+  return [pscustomobject]@{ name = $name; description = $desc; hint = $hint }
 }
 
 function Add-Row {
   param([string]$Kind, [string]$Invoke, [string]$Description, [string]$Hint, [string]$Plugin, [string]$Marketplace, [string]$Path)
   if ([string]::IsNullOrWhiteSpace($Invoke)) { return }
-  $k = $Invoke.ToLowerInvariant()
-  if ($seen.ContainsKey($k)) { return }
-  $seen[$k] = 1
+  # 不在扫描期去重：同名条目可能来自不同来源，交给 JS 在应用来源开关后按优先级解析。
   [void]$rows.Add([pscustomobject]@{
     kind = $Kind
     invoke = $Invoke
@@ -1147,6 +1254,35 @@ function Add-Row {
     marketplace = $Marketplace
     path = $Path
   })
+}
+
+# 项目/用户/插件三段技能扫描只差目录、来源和两个开关，收进同一处。
+# 注意 $hidden 是脚本作用域：函数内必须写 $script:hidden，否则只改局部副本。
+function Collect-Skill-Rows {
+  param(
+    [string]$Root,
+    [string]$Kind,
+    [string]$Plugin = '',
+    [string]$Marketplace = '',
+    [bool]$Disabled = $false,
+    [bool]$ApplyOverrides = $true
+  )
+  if (-not (Test-Path -LiteralPath $Root)) { return }
+  foreach ($d in @(Get-ChildItem -LiteralPath $Root -Directory -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+    $md = Join-Path $d.FullName 'SKILL.md'
+    if (-not (Test-Path -LiteralPath $md)) { continue }
+    if ($Disabled) { $script:hidden++; continue }
+    $meta = Read-Meta $md
+    $name = if ([string]::IsNullOrWhiteSpace($meta.name)) { $d.Name } else { $meta.name }
+    $desc = $meta.description
+    if ($ApplyOverrides) {
+      $state = Skill-State $name
+      if ($state -eq 'off') { $script:hidden++; continue }
+      if ($state -eq 'name-only') { $desc = '' }
+    }
+    $invoke = if ([string]::IsNullOrWhiteSpace($Plugin)) { '/' + $name } else { '/' + $Plugin + ':' + $name }
+    Add-Row $Kind $invoke $desc $meta.hint $Plugin $Marketplace $md
+  }
 }
 
 function Strip-Rel {
@@ -1163,6 +1299,21 @@ function Strip-Rel {
   return ($rel -replace '[\\/]', ':')
 }
 
+# --- 项目级（当前工作区）---
+# 先加项目级：Add-Row 按调用名先到先得，同名时项目版自然压过用户版。
+if (-not [string]::IsNullOrWhiteSpace($ws)) {
+  $wsClaude = Join-Path $ws '.claude'
+  $projCmd = Join-Path $wsClaude 'commands'
+  if (Test-Path -LiteralPath $projCmd) {
+    foreach ($f in @(Get-ChildItem -LiteralPath $projCmd -Recurse -File -Filter *.md -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+      $meta = Read-Meta $f.FullName
+      Add-Row 'project-command' ('/' + (Strip-Rel $projCmd $f.FullName)) $meta.description $meta.hint '' '' $f.FullName
+    }
+  }
+  $projSkill = Join-Path $wsClaude 'skills'
+  Collect-Skill-Rows -Root $projSkill -Kind 'project-skill'
+}
+
 # --- 用户级 ---
 $userCmd = Join-Path $claudeDir 'commands'
 if (Test-Path -LiteralPath $userCmd) {
@@ -1172,24 +1323,15 @@ if (Test-Path -LiteralPath $userCmd) {
   }
 }
 $userSkill = Join-Path $claudeDir 'skills'
-if (Test-Path -LiteralPath $userSkill) {
-  foreach ($d in @(Get-ChildItem -LiteralPath $userSkill -Directory -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
-    $md = Join-Path $d.FullName 'SKILL.md'
-    if (-not (Test-Path -LiteralPath $md)) { continue }
-    $meta = Read-Meta $md
-    Add-Row 'user-skill' ('/' + $d.Name) $meta.description $meta.hint '' '' $md
-  }
-}
+Collect-Skill-Rows -Root $userSkill -Kind 'user-skill'
 
 # --- 插件：优先用 Claude Code 记录的安装路径与启用清单 ---
 # installed_plugins.json 的 installPath 是当前真正加载的目录（版本名可能是 commit hash），
-# 比按目录名或修改时间猜版本可靠；settings.json 的 enabledPlugins 决定插件命令是否可用。
+# 比按目录名或修改时间猜版本可靠；合并后的 enabledPlugins 决定插件命令是否可用。
 $cacheRoot = Join-Path $claudeDir 'plugins\cache'
 $entries = New-Object System.Collections.ArrayList
 $installedFile = Join-Path $claudeDir 'plugins\installed_plugins.json'
-$settingsFile = Join-Path $claudeDir 'settings.json'
 $installed = $null
-$enabledPlugins = $null
 
 if (Test-Path -LiteralPath $installedFile) {
   try {
@@ -1197,21 +1339,10 @@ if (Test-Path -LiteralPath $installedFile) {
     if ($rawInstalled -and $rawInstalled.plugins) { $installed = $rawInstalled.plugins }
   } catch {}
 }
-if (Test-Path -LiteralPath $settingsFile) {
-  try {
-    $cfg = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($cfg -and $cfg.PSObject.Properties['enabledPlugins']) { $enabledPlugins = $cfg.enabledPlugins }
-  } catch {}
-}
 
 if ($installed) {
   foreach ($prop in $installed.PSObject.Properties) {
     $key = [string]$prop.Name
-    # 有启用清单时只保留显式启用的插件，避免列出装了但没开的命令
-    if ($enabledPlugins -ne $null) {
-      $ep = $enabledPlugins.PSObject.Properties[$key]
-      if (-not $ep -or $ep.Value -ne $true) { continue }
-    }
     $list = @($prop.Value)
     if ($list.Count -eq 0) { continue }
     $pick = $null
@@ -1222,7 +1353,13 @@ if ($installed) {
     $at = $key.LastIndexOf('@')
     $pluginName = if ($at -gt 0) { $key.Substring(0, $at) } else { $key }
     $marketName = if ($at -gt 0) { $key.Substring($at + 1) } else { '' }
-    [void]$entries.Add([pscustomobject]@{ market = $marketName; plugin = $pluginName; dir = $dir })
+    # 有启用清单时只保留合并后显式为 true 的插件，避免列出装了但没开、
+    # 或被项目/团队层关掉的命令。禁用插件的条目仍进列表，循环里逐条计入隐藏数。
+    $disabled = $false
+    if ($hasEnabledList) {
+      if (-not $enabledMap.ContainsKey($key) -or $enabledMap[$key] -ne $true) { $disabled = $true }
+    }
+    [void]$entries.Add([pscustomobject]@{ market = $marketName; plugin = $pluginName; dir = $dir; disabled = $disabled })
   }
 } elseif (Test-Path -LiteralPath $cacheRoot) {
   # 回退：没有安装清单时遍历缓存。时间相同则按语义版本、最后按目录名兜底。
@@ -1233,7 +1370,12 @@ if ($installed) {
       $latest = $versions |
         Sort-Object @{ Expression = { $_.LastWriteTime } }, @{ Expression = { $vm = [regex]::Match($_.Name, '\d+\.\d+\.\d+'); if ($vm.Success) { [version]$vm.Value } else { [version]'0.0.0' } } }, @{ Expression = { $_.Name } } -Descending |
         Select-Object -First 1
-      [void]$entries.Add([pscustomobject]@{ market = $market.Name; plugin = $plugin.Name; dir = $latest.FullName })
+      $key = $plugin.Name + '@' + $market.Name
+      $disabledFallback = $false
+      if ($hasEnabledList) {
+        if (-not $enabledMap.ContainsKey($key) -or $enabledMap[$key] -ne $true) { $disabledFallback = $true }
+      }
+      [void]$entries.Add([pscustomobject]@{ market = $market.Name; plugin = $plugin.Name; dir = $latest.FullName; disabled = $disabledFallback })
     }
   }
 }
@@ -1241,37 +1383,36 @@ if ($installed) {
     $cmdRoot = Join-Path $e.dir 'commands'
     if (Test-Path -LiteralPath $cmdRoot) {
       foreach ($f in @(Get-ChildItem -LiteralPath $cmdRoot -Recurse -File -Filter *.md -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
+        if ($e.disabled) { $hidden++; continue }
         $meta = Read-Meta $f.FullName
         Add-Row 'plugin-command' ('/' + $e.plugin + ':' + (Strip-Rel $cmdRoot $f.FullName)) $meta.description $meta.hint $e.plugin $e.market $f.FullName
       }
     }
     $skillRoot = Join-Path $e.dir 'skills'
-    if (Test-Path -LiteralPath $skillRoot) {
-      foreach ($d in @(Get-ChildItem -LiteralPath $skillRoot -Directory -Attributes !ReparsePoint -ErrorAction SilentlyContinue)) {
-        $md = Join-Path $d.FullName 'SKILL.md'
-        if (-not (Test-Path -LiteralPath $md)) { continue }
-        $meta = Read-Meta $md
-        Add-Row 'plugin-skill' ('/' + $e.plugin + ':' + $d.Name) $meta.description $meta.hint $e.plugin $e.market $md
-      }
-    }
+    # 插件技能不读 skillOverrides：它只控制个人/项目技能。
+    Collect-Skill-Rows -Root $skillRoot -Kind 'plugin-skill' -Plugin $e.plugin -Marketplace $e.market -Disabled $e.disabled -ApplyOverrides $false
   }
 
 $order = @{
-  'user-command' = 0; 'user-skill' = 1;
-  'plugin-command' = 2; 'plugin-skill' = 3
+  'project-command' = 0; 'project-skill' = 1;
+  'user-command' = 2; 'user-skill' = 3;
+  'plugin-command' = 4; 'plugin-skill' = 5
 }
 $sorted = @($rows | Sort-Object @{ Expression = { $order[$_.kind] } }, @{ Expression = { $_.invoke } })
 
 $result = [pscustomobject]@{
   ok = $true
   generatedAt = (Get-Date).ToUniversalTime().ToString('o')
+  hidden = $hidden
   roots = [pscustomobject]@{
     home = $homeDir
     claude = $claudeDir
     plugins = $cacheRoot
+    ws = $ws
   }
   counts = [pscustomobject]@{
     plugins = @($rows | Where-Object { $_.kind -like 'plugin-*' }).Count
+    project = @($rows | Where-Object { $_.kind -like 'project-*' }).Count
     user = @($rows | Where-Object { $_.kind -like 'user-*' }).Count
   }
   items = $sorted
@@ -1317,6 +1458,8 @@ export default function activate(ctx) {
       status: 'idle', // idle | scanning | ok | stale | error
       items: [],
       at: 0,
+      ws: '',
+      hidden: 0,
       roots: {},
       counts: {},
       error: '',
@@ -1355,14 +1498,11 @@ export default function activate(ctx) {
   function normalizeItems(raw) {
     const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
     const out = [];
-    const seen = new Set();
+    // 这里不去重：同名条目可能有不同来源，要等应用来源开关后再按优先级解析。
     for (const it of list) {
       if (!it || typeof it !== 'object') continue;
       const invoke = typeof it.invoke === 'string' ? it.invoke.trim() : '';
       if (!invoke || invoke.charAt(0) !== '/' || invoke.length < 2) continue;
-      const key = invoke.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
       out.push({
         kind: typeof it.kind === 'string' ? it.kind : 'other',
         invoke,
@@ -1376,16 +1516,37 @@ export default function activate(ctx) {
     return out;
   }
 
+  // 同名条目谁生效：命令是项目 > 用户；技能是个人 > 项目（官方 skills 优先级）。
+  // 插件命令带命名空间，正常不会撞名，给个中间值兜底。
+  const SOURCE_RANK = {
+    'project-command': 60,
+    'user-command': 50,
+    'user-skill': 40,
+    'project-skill': 30,
+    'plugin-command': 20,
+    'plugin-skill': 20,
+    builtin: 10,
+  };
+
   function visibleItems(snap) {
     const s = snap.settings || DEFAULT_SETTINGS;
     const out = [];
+    const byKey = new Map();
     for (const it of snap.items) {
       if (it.kind.indexOf('plugin-') === 0 && !s.plugins) continue;
+      if (it.kind.indexOf('project-') === 0 && !s.project) continue;
       if (it.kind.indexOf('user-') === 0 && !s.user) continue;
-      out.push(it);
+      const key = it.invoke.toLowerCase();
+      const prev = byKey.get(key);
+      if (!prev || (SOURCE_RANK[it.kind] || 0) > (SOURCE_RANK[prev.kind] || 0)) {
+        byKey.set(key, it);
+      }
     }
+    for (const it of byKey.values()) out.push(it);
     if (s.builtin) {
-      for (const b of BUILTIN) out.push(b);
+      for (const b of BUILTIN) {
+        if (!byKey.has(b.invoke.toLowerCase())) out.push(b);
+      }
     }
     return out;
   }
@@ -1417,15 +1578,54 @@ export default function activate(ctx) {
   }
 
   let inflight = null;
+  let inflightWs = '';
+  let queuedWs = null;
 
-  async function runScan() {
+  // 去尾分隔符、去空白；盘符根（C:\）长度只有 3，不能剥成 C:。
+  function normalizeWorkspace(p) {
+    if (typeof p !== 'string') return null;
+    const trimmed = p.trim();
+    if (!trimmed) return null;
+    return trimmed.length > 3 ? trimmed.replace(/[\\/]+$/, '') : trimmed;
+  }
+
+  function sameWorkspace(a, b) {
+    return String(a || '').toLowerCase() === String(b || '').toLowerCase();
+  }
+
+  // 宿主 IPC 卡住时不能无限等，否则设置页的 settingsLoaded 永远不置位。
+  function withTimeout(promise, ms) {
+    return Promise.race([
+      promise,
+      new Promise((resolve) => {
+        setTimeout(() => resolve(null), ms);
+      }),
+    ]);
+  }
+
+  // 拿当前会话所在工作区；宿主未就绪、没授权或超时都返回 null。
+  // 用 null 而不是空串，避免把「这次没拿到」误判成「工作区变了」而清掉项目层。
+  async function currentWorkspace() {
+    try {
+      if (!ctx.workspace || typeof ctx.workspace.getMetadata !== 'function') return null;
+      const meta = await withTimeout(ctx.workspace.getMetadata(), 1500);
+      return meta ? normalizeWorkspace(meta.path) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function runScan(ws) {
     store.set({ status: 'scanning', error: '' });
     try {
-      const encoded = toEncodedCommand(SCAN_SCRIPT);
-      if (!encoded) throw new Error('无法编码 PowerShell 脚本');
+      // 工作区路径经 base64 注入，脚本里再解回字符串。
+      const script = "$wsB64 = '" + toBase64Utf8(ws) + "'\n" + SCAN_SCRIPT;
+      // Windows 命令行上限 32767 字符；脚本 12K 左右，直传 -Command 即可。
+      // 走 -EncodedCommand 会把脚本放大到 ~4/3 倍 UTF-16，超限时进程直接起不来。
+      if (script.length > 30000) throw new Error('扫描脚本过长');
       const r = await ctx.bridge.invoke('plugin_exec_run', {
         bin: 'powershell',
-        args: ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+        args: ['-NoProfile', '-NonInteractive', '-Command', script],
         timeoutMs: 30000,
       });
       // 宿主返回值存在数字码与字符串码两种形态
@@ -1440,26 +1640,46 @@ export default function activate(ctx) {
       const data = JSON.parse(text);
       const items = normalizeItems(data && data.items);
       const at = Date.now();
+      const hidden = Number(data && data.hidden) || 0;
       const roots = data && data.roots && typeof data.roots === 'object' ? data.roots : {};
       const counts = data && data.counts && typeof data.counts === 'object' ? data.counts : {};
-      store.set({ status: 'ok', items, at, roots, counts, error: '' });
+      store.set({ status: 'ok', items, at, ws, hidden, roots, counts, error: '' });
       if (ctx.storage) {
         try {
-          await ctx.storage.set(CACHE_KEY, { version: 1, at, items, roots, counts });
+          await ctx.storage.set(CACHE_KEY, { version: 2, at, ws, hidden, items, roots, counts });
         } catch {
           // 缓存写失败不影响本次结果
         }
       }
     } catch (e) {
-      const hadItems = store.snap.items.length > 0;
-      store.set({ status: hadItems ? 'stale' : 'error', error: errorText(e) });
+      // 换工作区后扫描失败时，旧的项目命令已经不属于当前目录，必须剔除；
+      // 同一工作区的失败则保留旧列表，避免一次网络/权限抖动把面板清空。
+      const prev = store.snap;
+      const sameWs = sameWorkspace(ws, prev.ws);
+      const items = sameWs ? prev.items : prev.items.filter((it) => it.kind.indexOf('project-') !== 0);
+      store.set({
+        status: items.length ? 'stale' : 'error',
+        items,
+        ws,
+        hidden: sameWs ? prev.hidden : 0,
+        error: errorText(e),
+      });
     }
   }
 
-  function scan() {
-    if (inflight) return inflight;
-    inflight = runScan().finally(() => {
+  function scan(ws) {
+    if (inflight) {
+      // 扫描中切了工作区：排一次队，等当前扫描结束再扫新目录。
+      // 又切回正在扫的那个就清掉队列，别在结束后多扫一次旧目标。
+      queuedWs = sameWorkspace(ws, inflightWs) ? null : ws;
+      return inflight;
+    }
+    inflightWs = ws;
+    inflight = runScan(ws).finally(() => {
       inflight = null;
+      const next = queuedWs;
+      queuedWs = null;
+      if (next !== null && !sameWorkspace(next, ws)) void scan(next);
     });
     return inflight;
   }
@@ -1482,9 +1702,31 @@ export default function activate(ctx) {
     }
   }
 
+  // 手动刷新不看 TTL，但要带上当前工作区，否则项目层会读到旧目录。
+  // 这次没拿到工作区时沿用上次的，绝不拿空串去扫（会把项目层清掉并写进缓存）。
+  function refreshNow() {
+    return currentWorkspace().then((ws) => scan(ws !== null ? ws : store.snap.ws || ''));
+  }
+
   function openPalette() {
     store.set({ open: true, query: '', activeIndex: 0 });
-    if (!store.snap.items.length && store.snap.status !== 'scanning') void scan();
+    void refreshIfNeeded();
+  }
+
+  // 状态行按钮和命令面板入口都走这里，所以刷新策略只在这一处判断：
+  // 工作区变了、没数据、或数据超过 TTL 才扫；否则直接用内存里的列表。
+  async function refreshIfNeeded() {
+    const ws = await currentWorkspace();
+    const snap = store.snap;
+    const changed = ws !== null && !sameWorkspace(ws, snap.ws);
+    if (snap.status === 'scanning') {
+      // 扫描中切了工作区：排队，别让旧工作区的结果留在 B 的面板里。
+      if (changed) void scan(ws);
+      return;
+    }
+    const target = ws !== null ? ws : snap.ws || '';
+    const stale = Date.now() - (Number(snap.at) || 0) > CACHE_TTL;
+    if (changed || !snap.items.length || stale) void scan(target);
   }
 
   async function readSettings() {
@@ -1495,6 +1737,7 @@ export default function activate(ctx) {
       return {
         plugins: s.plugins !== false,
         user: s.user !== false,
+        project: s.project !== false,
         builtin: s.builtin === true,
         showDesc: s.showDesc !== false,
       };
@@ -1513,10 +1756,13 @@ export default function activate(ctx) {
     }
   }
 
-  // 启动：先恢复设置与缓存，缓存过期或缺失才重扫
+  // 启动：先恢复设置与缓存，缓存过期、缺失或换了工作区才重扫
   void (async () => {
     const settings = await readSettings();
+    // settingsLoaded 先置位：工作区元数据拿不到时也不能把设置页一直禁用着。
     store.set({ settings, settingsLoaded: true });
+    const ws = (await currentWorkspace()) || '';
+    store.set({ ws });
     let saved = null;
     if (ctx.storage) {
       try {
@@ -1525,18 +1771,27 @@ export default function activate(ctx) {
         saved = null;
       }
     }
-    // 空结果不当作有效缓存：否则 ~/.claude 尚未生成时，10 分钟内新装的命令都看不到
-    if (saved && saved.version === 1 && Array.isArray(saved.items) && saved.items.length) {
+    // 空结果不当作有效缓存：否则 ~/.claude 尚未生成时，5 分钟内新装的命令都看不到。
+    // 工作区不同也不能复用：项目层命令完全来自另一个目录。
+    if (
+      saved &&
+      saved.version === 2 &&
+      sameWorkspace(saved.ws, ws) &&
+      Array.isArray(saved.items) &&
+      saved.items.length
+    ) {
       store.set({
         status: 'ok',
         items: normalizeItems(saved.items),
         at: Number(saved.at) || 0,
+        ws,
+        hidden: Number(saved.hidden) || 0,
         roots: saved.roots && typeof saved.roots === 'object' ? saved.roots : {},
         counts: saved.counts && typeof saved.counts === 'object' ? saved.counts : {},
       });
       if (Date.now() - (Number(saved.at) || 0) < CACHE_TTL) return;
     }
-    await scan();
+    await scan(ws);
   })();
 
   function fmtTime(ts) {
@@ -1698,17 +1953,25 @@ export default function activate(ctx) {
         'div',
         { className: 'sp-status sp-status-error' },
         '扫描失败：' + snap.error,
-        h('button', { className: 'sp-retry', onClick: () => void scan() }, '重试'),
+        h('button', { className: 'sp-retry', onClick: () => void refreshNow() }, '重试'),
       );
     } else if (snap.status === 'stale') {
       statusLine = h(
         'div',
         { className: 'sp-status sp-status-warn' },
         '正在使用缓存结果：' + snap.error,
-        h('button', { className: 'sp-retry', onClick: () => void scan() }, '重试'),
+        h('button', { className: 'sp-retry', onClick: () => void refreshNow() }, '重试'),
       );
     } else if (snap.at) {
-      statusLine = h('div', { className: 'sp-status' }, '共 ' + all.length + ' 条 · 更新于 ' + fmtTime(snap.at));
+      statusLine = h(
+        'div',
+        { className: 'sp-status' },
+        '共 ' +
+          all.length +
+          ' 条 · 更新于 ' +
+          fmtTime(snap.at) +
+          (snap.hidden ? ' · 已隐藏 ' + snap.hidden + ' 条当前工作区不可用' : ''),
+      );
     }
 
     return h(
@@ -1754,7 +2017,22 @@ export default function activate(ctx) {
           'div',
           { className: 'sp-foot' },
           h('span', null, '↑↓ 选择 · Enter 写入 · Esc 关闭'),
-          h('span', { className: 'sp-foot-warn' }, '写入会替换输入框现有内容'),
+          h(
+            'span',
+            { className: 'sp-foot-right' },
+            h('span', { className: 'sp-foot-warn' }, '写入会替换输入框现有内容'),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'sp-refresh',
+                disabled: snap.status === 'scanning',
+                title: '重新扫描本机命令目录',
+                onClick: () => void refreshNow(),
+              },
+              snap.status === 'scanning' ? '刷新中…' : '刷新',
+            ),
+          ),
         ),
       ),
     );
@@ -1841,21 +2119,26 @@ export default function activate(ctx) {
         { className: 'sp-setting-desc' },
         '仅扫描 Claude Code 的命令目录。在输入框状态行的「/ 命令」按钮里搜索并插入命令；插件只能写入草稿，不能读取输入框内容，也不会自动发送。',
       ),
-      row('plugins', '插件命令与技能', '读取 ~/.claude/plugins/cache 下的 commands/*.md 与 skills/*/SKILL.md。'),
+      row('project', '项目命令与技能', '读取当前工作区 .claude/commands/*.md 与 .claude/skills/*/SKILL.md。'),
       row('user', '用户命令与技能', '读取 ~/.claude/commands/*.md 与 ~/.claude/skills/*/SKILL.md。'),
+      row('plugins', '插件命令与技能', '读取 ~/.claude/plugins/cache 下的 commands/*.md 与 skills/*/SKILL.md。'),
       row('builtin', '内置命令', '补充 /help、/clear、/compact 等常见命令，可能与宿主自带列表重复。'),
       row('showDesc', '显示命令描述', '在列表里显示每个命令 frontmatter 里的 description。'),
       h(
         'div',
         { className: 'sp-actions' },
-        h('button', { className: 'sp-btn', onClick: () => void scan() }, snap.status === 'scanning' ? '扫描中…' : '立即刷新'),
+        h('button', { className: 'sp-btn', onClick: () => void refreshNow() }, snap.status === 'scanning' ? '扫描中…' : '立即刷新'),
         h('span', { className: 'sp-setting-desc' }, '上次扫描：' + fmtTime(snap.at)),
       ),
       snap.error ? h('div', { className: 'sp-status sp-status-error' }, '上次错误：' + snap.error) : null,
       h(
         'div',
         { className: 'sp-diag' },
-        '插件命令 ' + (counts.plugins || 0) + ' · 用户 ' + (counts.user || 0) + '\n' +
+        '项目命令 ' + (counts.project || 0) +
+          ' · 插件命令 ' + (counts.plugins || 0) +
+          ' · 用户 ' + (counts.user || 0) +
+          (snap.hidden ? ' · 隐藏 ' + snap.hidden : '') + '\n' +
+          '工作区：' + shortPath(roots.ws) + '\n' +
           'CLI 目录：' + shortPath(roots.claude) + '\n' +
           '插件缓存：' + shortPath(roots.plugins),
       ),
