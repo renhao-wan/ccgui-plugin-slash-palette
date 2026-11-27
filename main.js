@@ -1811,14 +1811,25 @@ export default function activate(ctx) {
     );
   }
 
+  // 不要写内联 display：宿主设置侧栏的可拖拽行会渲染两次图标，第二次靠
+  // className 里的 `md:hidden` 在桌面隐藏，内联 display 会压过它，变成两个图标。
   function Icon(props) {
     return h(
-      'span',
+      'svg',
       {
-        className: props && props.className,
-        style: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 },
+        width: 16,
+        height: 16,
+        viewBox: '0 0 16 16',
+        fill: 'none',
+        stroke: 'currentColor',
+        'aria-hidden': 'true',
+        ...(props && props.className ? { className: props.className } : {}),
       },
-      '/',
+      h('path', {
+        d: 'M5.44 12.94L10.56 3.06',
+        strokeWidth: 1.87,
+        strokeLinecap: 'round',
+      }),
     );
   }
 
