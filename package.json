@@ -13,6 +13,6 @@
     "shared:check": "shared-version"
   },
   "dependencies": {
-    "ccgui-plugin-shared": "github:renhao-wan/ccgui-plugin-shared#v0.2.1"
+    "ccgui-plugin-shared": "github:renhao-wan/ccgui-plugin-shared#v0.2.2"
   }
 }
